@@ -2,7 +2,7 @@
 
 [English](README_EN.md)
 
-`deepseek-harness-desktop` 是官方 DeepSeek Harness Web UI 的轻量桌面启动器。
+`deepseek-harness-desktop` 是官方 DeepSeek Harness Web UI 的轻量桌面启动器，不保存任何信息，会辅助检查deepseek-harness更新。
 
 ## 开发
 

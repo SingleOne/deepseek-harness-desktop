@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-`deepseek-harness-desktop` is a lightweight desktop launcher for the official DeepSeek Harness Web UI.
+`deepseek-harness-desktop` is a lightweight desktop launcher for the official DeepSeek Harness Web UI. It does not store any information and helps check for DeepSeek Harness updates.
 
 ## Development
 
