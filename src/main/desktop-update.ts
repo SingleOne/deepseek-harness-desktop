@@ -8,13 +8,6 @@ import {
 } from 'electron'
 import semver from 'semver'
 
-interface DesktopReleaseManifest {
-  version?: string
-  tag_name?: string
-  downloadUrl?: string
-  html_url?: string
-}
-
 interface DesktopRelease {
   version: string
   downloadUrl: string
@@ -23,27 +16,27 @@ interface DesktopRelease {
 type OutputLine = (line: string) => void
 
 async function fetchLatestDesktopRelease(onLine?: OutputLine): Promise<DesktopRelease | null> {
-  onLine?.(`[应用更新] GET ${__DESKTOP_UPDATE_MANIFEST_URL__}`)
+  onLine?.(`[应用更新] HEAD ${__DESKTOP_UPDATE_RELEASE_URL__}`)
 
-  const response = await fetch(__DESKTOP_UPDATE_MANIFEST_URL__, {
+  const response = await fetch(__DESKTOP_UPDATE_RELEASE_URL__, {
+    method: 'HEAD',
     headers: {
-      Accept: 'application/json',
       'User-Agent': `deepseek-harness-desktop/${app.getVersion()}`
     },
     signal: AbortSignal.timeout(10_000)
   })
 
   if (!response.ok) {
-    throw new Error(`更新服务返回 HTTP ${response.status}`)
+    throw new Error(`GitHub Release 页面返回 HTTP ${response.status}`)
   }
 
-  onLine?.(`[应用更新] HTTP ${response.status}，解析更新清单`)
+  const releaseUrl = response.url
+  onLine?.(`[应用更新] HTTP ${response.status}，重定向至 ${releaseUrl}`)
 
-  const manifest = (await response.json()) as DesktopReleaseManifest
-  const version = (manifest.version ?? manifest.tag_name ?? '').replace(/^v/, '')
-  const downloadUrl = manifest.downloadUrl ?? manifest.html_url ?? ''
-  if (!semver.valid(version) || !downloadUrl) {
-    throw new Error('更新清单缺少有效的 version 或 downloadUrl')
+  const tag = new URL(releaseUrl).pathname.match(/\/releases\/tag\/([^/]+)\/?$/)?.[1]
+  const version = decodeURIComponent(tag ?? '').replace(/^v/, '')
+  if (!semver.valid(version)) {
+    throw new Error(`无法从 GitHub Release 地址识别版本：${releaseUrl}`)
   }
 
   if (!semver.gt(version, app.getVersion())) {
@@ -51,7 +44,7 @@ async function fetchLatestDesktopRelease(onLine?: OutputLine): Promise<DesktopRe
     return null
   }
   onLine?.(`[应用更新] 发现新版本 ${version}`)
-  return { version, downloadUrl }
+  return { version, downloadUrl: releaseUrl }
 }
 
 function showUpdateMessage(
@@ -68,21 +61,6 @@ export async function checkDesktopUpdate(
   onLine?: OutputLine,
   notifyIfNoUpdate = false
 ): Promise<void> {
-  if (!__DESKTOP_UPDATE_MANIFEST_URL__) {
-    onLine?.('[应用更新] 未配置更新清单，跳过应用自身更新检查')
-    if (notifyIfNoUpdate) {
-      await showUpdateMessage(window, {
-        type: 'info',
-        title: 'dsh-desktop 更新',
-        message: '暂时无法检查更新',
-        detail: '当前版本未配置 dsh-desktop 更新源。',
-        buttons: ['确定'],
-        noLink: true
-      })
-    }
-    return
-  }
-
   const release = await fetchLatestDesktopRelease(onLine)
   if (!release) {
     if (notifyIfNoUpdate) {

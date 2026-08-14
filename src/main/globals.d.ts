@@ -1,1 +1,1 @@
-declare const __DESKTOP_UPDATE_MANIFEST_URL__: string
+declare const __DESKTOP_UPDATE_RELEASE_URL__: string
