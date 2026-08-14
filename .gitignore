@@ -1,0 +1,9 @@
+node_modules/
+out/
+dist/
+release/
+debug-run/
+*.log
+.env
+.env.*
+!.env.example

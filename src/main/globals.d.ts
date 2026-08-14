@@ -1,0 +1,1 @@
+declare const __DESKTOP_UPDATE_MANIFEST_URL__: string
