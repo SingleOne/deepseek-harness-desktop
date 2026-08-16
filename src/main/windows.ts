@@ -2,6 +2,7 @@ import { BrowserWindow, shell, WebContentsView } from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { MainSection } from '../shared/plugin-market'
+import { buildDshSessionActivationSource } from './notification-protocol'
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url))
 export const applicationIcon = path.join(currentDirectory, '../../resources/icon.png')
@@ -59,6 +60,7 @@ export function createLauncherWindow(): BrowserWindow {
 export interface MainWindowHandle {
   window: BrowserWindow
   loadDsh(url: string): Promise<void>
+  activateDshSession(sessionId: string, turn?: number): Promise<boolean>
   setSection(section: MainSection): void
   setDshReady(ready: boolean): void
 }
@@ -151,6 +153,17 @@ export function createMainWindow(): MainWindowHandle {
       await dshView.webContents.loadURL(url)
       dshReady = true
       updateVisibility()
+    },
+    async activateDshSession(sessionId: string, turn?: number): Promise<boolean> {
+      if (!dshReady || dshView.webContents.isDestroyed()) return false
+      try {
+        return await dshView.webContents.executeJavaScript(
+          buildDshSessionActivationSource(sessionId, turn),
+          true
+        ) === true
+      } catch {
+        return false
+      }
     },
     setSection(section: MainSection): void {
       activeSection = section

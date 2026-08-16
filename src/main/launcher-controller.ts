@@ -16,6 +16,8 @@ import {
   type DshInstallation
 } from './dsh-service'
 import { findAvailablePort } from './port'
+import type { NotificationBridgeEnvironment } from './notification-bridge'
+import type { DesktopNotificationMessage } from './notification-protocol'
 import type { MainWindowHandle } from './windows'
 
 type MainWindowFactory = () => MainWindowHandle
@@ -44,7 +46,8 @@ export class LauncherController {
   constructor(
     private readonly launcherWindow: BrowserWindow,
     private readonly createMainWindow: MainWindowFactory,
-    debugMode: boolean
+    debugMode: boolean,
+    private readonly notificationBridgeEnvironment?: NotificationBridgeEnvironment
   ) {
     this.debugMode = debugMode
   }
@@ -82,6 +85,14 @@ export class LauncherController {
 
   setMainSection(section: MainSection): void {
     this.mainWindow?.setSection(section)
+  }
+
+  async activateDshSession(notification: DesktopNotificationMessage): Promise<void> {
+    const handle = this.mainWindow
+    if (!handle || handle.window.isDestroyed()) return
+    this.openMainSection('dsh')
+    const activated = await handle.activateDshSession(notification.sessionId, notification.turn)
+    if (!activated) console.warn('通知对应的 DSH 会话暂时无法定位')
   }
 
   async start(): Promise<void> {
@@ -272,7 +283,8 @@ export class LauncherController {
       installation,
       port,
       app.getPath('home'),
-      (line) => this.appendDetailedLog(line)
+      (line) => this.appendDetailedLog(line),
+      { notificationBridgeEnvironment: this.notificationBridgeEnvironment }
     )
 
     this.dshProcess.once('error', (error) => this.appendLog(`[error] ${error.message}`, 'error'))

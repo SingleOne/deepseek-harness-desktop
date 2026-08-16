@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell, Tray } from 'electron'
 import os from 'node:os'
 import path from 'node:path'
 import { rm } from 'node:fs/promises'
@@ -6,7 +6,9 @@ import { launcherChannels } from '../shared/launcher'
 import type { MainSection } from '../shared/plugin-market'
 import { mainChannels, pluginChannels } from '../shared/plugin-market'
 import { checkDesktopUpdateManually } from './desktop-update'
+import { DesktopNotificationPresenter } from './desktop-notifications'
 import { LauncherController } from './launcher-controller'
+import { startNotificationBridge, type NotificationBridge } from './notification-bridge'
 import { PluginCatalogService } from './plugin-catalog-service'
 import { PluginProfileService } from './plugin-profile-service'
 import { PluginService } from './plugin-service'
@@ -15,6 +17,7 @@ import { applicationIcon, createLauncherWindow, createMainWindow } from './windo
 const runtimeDataDirectory = path.join(os.tmpdir(), 'deepseek-harness-desktop', String(process.pid))
 app.setPath('userData', runtimeDataDirectory)
 app.setPath('sessionData', path.join(runtimeDataDirectory, 'session'))
+app.setAppUserModelId('com.deepseek-harness.desktop')
 
 const debugMode = process.argv.includes('--launcher-debug')
 
@@ -30,6 +33,9 @@ if (!hasSingleInstanceLock) {
   let tray: Tray | null = null
   let lastActiveWindow: BrowserWindow | null = null
   let pluginService: PluginService | null = null
+  let notificationBridge: NotificationBridge | null = null
+  let notificationPresenter: DesktopNotificationPresenter | null = null
+  let shutdownPromise: Promise<void> | null = null
 
   const restoreMainWindow = (): void => {
     const window =
@@ -58,10 +64,20 @@ if (!hasSingleInstanceLock) {
     restoreMainWindow()
   })
 
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise
+    notificationPresenter?.dispose()
+    shutdownPromise = Promise.allSettled([
+      controller?.shutdown() ?? Promise.resolve(),
+      notificationBridge?.close() ?? Promise.resolve()
+    ]).then(() => undefined)
+    return shutdownPromise
+  }
+
   app.on('before-quit', (event) => {
-    if (allowQuit || !controller) return
+    if (allowQuit) return
     event.preventDefault()
-    void controller.shutdown().finally(() => {
+    void shutdown().finally(() => {
       allowQuit = true
       app.quit()
     })
@@ -84,7 +100,7 @@ if (!hasSingleInstanceLock) {
     })
   })
 
-  void app.whenReady().then(() => {
+  void app.whenReady().then(async () => {
     tray = new Tray(applicationIcon)
     tray.setToolTip('dsh-desktop')
     tray.setContextMenu(
@@ -109,6 +125,25 @@ if (!hasSingleInstanceLock) {
     )
     tray.on('click', restoreMainWindow)
 
+    notificationPresenter = new DesktopNotificationPresenter(
+      {
+        isSupported: () => Notification.isSupported(),
+        create: (options) => new Notification(options)
+      },
+      applicationIcon,
+      (notification) => {
+        void controller?.activateDshSession(notification)
+      }
+    )
+    try {
+      notificationBridge = await startNotificationBridge((notification) => (
+        notificationPresenter?.show(notification) ?? false
+      ))
+      console.info('桌面通知桥接已启动')
+    } catch {
+      console.warn('桌面通知桥接启动失败，DSH 插件将使用原生通知')
+    }
+
     const launcherWindow = createLauncherWindow()
     lastActiveWindow = launcherWindow
     minimizeToTrayOnClose(launcherWindow)
@@ -119,7 +154,8 @@ if (!hasSingleInstanceLock) {
         minimizeToTrayOnClose(mainWindow.window)
         return mainWindow
       },
-      debugMode
+      debugMode,
+      notificationBridge?.environment
     )
 
     const catalogService = new PluginCatalogService()

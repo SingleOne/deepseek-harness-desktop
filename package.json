@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-desktop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A minimal desktop launcher for the official DeepSeek Harness Web UI.",
   "type": "module",
   "main": "./out/main/index.js",
@@ -10,6 +10,8 @@
     "generate:icon": "python scripts/generate-icon.py",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run build",
     "package:win": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
@@ -28,7 +30,8 @@
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
     "typescript": "7.0.2",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "vitest": "^4.1.10"
   },
   "build": {
     "appId": "com.deepseek-harness.desktop",

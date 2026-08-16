@@ -3,6 +3,11 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { bindDshOutput, spawnDshCommand } from './dsh-command'
+import {
+  DSH_NOTIFY_BRIDGE_TOKEN_ENV,
+  DSH_NOTIFY_BRIDGE_URL_ENV,
+  type NotificationBridgeEnvironment
+} from './notification-bridge'
 import { runNpmChecked } from './npm-command'
 
 const DSH_PACKAGE = '@deepseek-ai/dsh'
@@ -16,6 +21,10 @@ export interface DshInstallation {
   version: string
   entryPath: string
   nodePath?: string
+}
+
+export interface DshRuntimeOptions {
+  readonly notificationBridgeEnvironment?: NotificationBridgeEnvironment
 }
 
 type OutputLine = (line: string) => void
@@ -94,18 +103,24 @@ export function startDsh(
   installation: DshInstallation,
   port: number,
   workingDirectory: string,
-  onLine: (line: string) => void
+  onLine: (line: string) => void,
+  options: DshRuntimeOptions = {}
 ): ChildProcess {
   onLine(`[环境] DSH 工作目录：${workingDirectory}`)
   onLine(`[环境] ELECTRON_RUN_AS_NODE=${process.env.ELECTRON_RUN_AS_NODE ?? '未设置'}`)
   onLine(`[环境] NODE_OPTIONS=${process.env.NODE_OPTIONS ?? '未设置'}`)
   onLine(`[环境] DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY=${installation.entryPath}`)
   onLine(`[环境] Node 可执行文件：${installation.nodePath ?? 'node（PATH）'}`)
+  onLine(`[环境] 桌面通知桥接=${options.notificationBridgeEnvironment ? '已启用' : '未启用'}`)
   const child = spawnDshCommand(
     installation,
     ['web', '--host', '127.0.0.1', '--port', String(port)],
     workingDirectory,
-    onLine
+    onLine,
+    {
+      environment: options.notificationBridgeEnvironment,
+      removeEnvironment: [DSH_NOTIFY_BRIDGE_URL_ENV, DSH_NOTIFY_BRIDGE_TOKEN_ENV]
+    }
   )
   bindDshOutput(child, onLine)
   return child

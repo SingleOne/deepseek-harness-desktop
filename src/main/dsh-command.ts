@@ -11,6 +11,8 @@ export interface DshCommandResult {
 
 export interface DshCommandOptions {
   timeoutMs?: number
+  environment?: Readonly<Record<string, string>>
+  removeEnvironment?: readonly string[]
 }
 
 const runnerSource = String.raw`
@@ -31,22 +33,33 @@ function displayArgument(argument: string): string {
   return /^[a-zA-Z0-9@._+/:=#-]+$/.test(argument) ? argument : JSON.stringify(argument)
 }
 
+export function buildDshCommandEnvironment(
+  installation: DshInstallation,
+  options: Pick<DshCommandOptions, 'environment' | 'removeEnvironment'> = {},
+  baseEnvironment: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const environment = { ...baseEnvironment }
+  for (const name of options.removeEnvironment ?? []) delete environment[name]
+  Object.assign(environment, options.environment)
+  environment.DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY = installation.entryPath
+  return environment
+}
+
 export function spawnDshCommand(
   installation: DshInstallation,
   args: string[],
   workingDirectory: string,
-  onLine?: OutputLine
+  onLine?: OutputLine,
+  options: Pick<DshCommandOptions, 'environment' | 'removeEnvironment'> = {}
 ): ChildProcess {
   onLine?.(`$ dsh ${args.map(displayArgument).join(' ')}`)
+  const environment = buildDshCommandEnvironment(installation, options)
   const child = spawn(
     installation.nodePath ?? 'node',
     ['--input-type=module', '--eval', runnerSource, '--', ...args],
     {
       cwd: workingDirectory,
-      env: {
-        ...process.env,
-        DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY: installation.entryPath
-      },
+      env: environment,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true
     }
@@ -93,7 +106,7 @@ export function runDshCommand(
   options: DshCommandOptions = {}
 ): Promise<DshCommandResult> {
   return new Promise((resolve, reject) => {
-    const child = spawnDshCommand(installation, args, workingDirectory, onLine)
+    const child = spawnDshCommand(installation, args, workingDirectory, onLine, options)
     let stdout = ''
     let stderr = ''
     let settled = false
