@@ -177,20 +177,13 @@ export function MainApp() {
       </header>
 
       <aside className="main-sidebar">
-        <div className="sidebar-brand">
-          <div className="brand-mark">DS</div>
-          <div>
-            <strong>DeepSeek Harness Desktop</strong>
-          </div>
-        </div>
-
         <nav className="main-navigation" aria-label="主导航">
           <button
             className={section === 'dsh' ? 'nav-item nav-item--active' : 'nav-item'}
             onClick={() => navigate('dsh')}
           >
             <MessageSquare aria-hidden="true" />
-            <span>DSH</span>
+            <span>Deepseek Harness</span>
             <i className={`runtime-dot runtime-dot--${runtime.phase}`} />
           </button>
           <button
@@ -210,10 +203,12 @@ export function MainApp() {
           </button>
         </nav>
 
-        <div className="sidebar-disclaimer">
-          <ShieldAlert aria-hidden="true" />
-          <span>市场内容来自社区目录，未经 DeepSeek 官方审核。</span>
-        </div>
+        {section === 'market' && (
+          <div className="sidebar-disclaimer">
+            <ShieldAlert aria-hidden="true" />
+            <span>市场内容来自社区目录</span>
+          </div>
+        )}
       </aside>
 
       <section className="main-workspace">

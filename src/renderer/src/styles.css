@@ -410,50 +410,11 @@ button {
   left: 0;
   display: flex;
   width: 100%;
-  height: 64px;
+  height: 44px;
   align-items: center;
   padding: 0 18px;
   border-bottom: 1px solid #1a2c44;
   background: #091525;
-}
-
-.sidebar-brand {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-width: 220px;
-  margin-right: 18px;
-}
-
-.brand-mark {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border: 1px solid #315083;
-  border-radius: 10px;
-  color: #b9ccff;
-  background: #102440;
-  font-size: 11px;
-  font-weight: 760;
-  letter-spacing: 0.04em;
-}
-
-.sidebar-brand strong,
-.sidebar-brand span {
-  display: block;
-}
-
-.sidebar-brand strong {
-  color: #eef4fc;
-  font-size: 13px;
-  letter-spacing: -0.01em;
-}
-
-.sidebar-brand span {
-  margin-top: 3px;
-  color: #657991;
-  font-size: 11px;
 }
 
 .main-navigation {
@@ -500,7 +461,7 @@ button {
 
 .nav-item em {
   min-width: 21px;
-  margin-left: auto;
+  margin-left: 8px;
   padding: 2px 6px;
   border-radius: 10px;
   color: #9db7ff;
@@ -542,7 +503,7 @@ button {
   border-radius: 8px;
   color: #71849b;
   background: #0b192a;
-  font-size: 10px;
+  font-size: 12px;
   line-height: 1.55;
 }
 
@@ -556,7 +517,7 @@ button {
 
 .main-workspace {
   position: absolute;
-  top: 108px;
+  top: 88px;
   right: 0;
   bottom: 0;
   left: 0;
@@ -1124,11 +1085,6 @@ button {
 }
 
 @media (max-width: 940px) {
-  .sidebar-brand {
-    min-width: auto;
-  }
-
-  .sidebar-brand > div:last-child,
   .sidebar-disclaimer {
     display: none;
   }
