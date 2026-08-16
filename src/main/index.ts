@@ -1,11 +1,16 @@
-import { app, BrowserWindow, ipcMain, Menu, Tray } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, Tray } from 'electron'
 import os from 'node:os'
 import path from 'node:path'
 import { rm } from 'node:fs/promises'
 import { launcherChannels } from '../shared/launcher'
+import type { MainSection } from '../shared/plugin-market'
+import { mainChannels, pluginChannels } from '../shared/plugin-market'
 import { checkDesktopUpdateManually } from './desktop-update'
 import { LauncherController } from './launcher-controller'
-import { applicationIcon, createDshWindow, createLauncherWindow } from './windows'
+import { PluginCatalogService } from './plugin-catalog-service'
+import { PluginProfileService } from './plugin-profile-service'
+import { PluginService } from './plugin-service'
+import { applicationIcon, createLauncherWindow, createMainWindow } from './windows'
 
 const runtimeDataDirectory = path.join(os.tmpdir(), 'deepseek-harness-desktop', String(process.pid))
 app.setPath('userData', runtimeDataDirectory)
@@ -24,6 +29,7 @@ if (!hasSingleInstanceLock) {
   let allowQuit = false
   let tray: Tray | null = null
   let lastActiveWindow: BrowserWindow | null = null
+  let pluginService: PluginService | null = null
 
   const restoreMainWindow = (): void => {
     const window =
@@ -88,6 +94,14 @@ if (!hasSingleInstanceLock) {
           click: () => void checkDesktopUpdateManually()
         },
         {
+          label: '打开主窗口',
+          click: () => controller?.openDsh()
+        },
+        {
+          label: '插件市场',
+          click: () => controller?.openMainSection('market')
+        },
+        {
           label: '退出',
           click: () => app.quit()
         }
@@ -100,13 +114,34 @@ if (!hasSingleInstanceLock) {
     minimizeToTrayOnClose(launcherWindow)
     controller = new LauncherController(
       launcherWindow,
-      (url, options) => {
-        const dshWindow = createDshWindow(url, options)
-        minimizeToTrayOnClose(dshWindow)
-        return dshWindow
+      () => {
+        const mainWindow = createMainWindow()
+        minimizeToTrayOnClose(mainWindow.window)
+        return mainWindow
       },
       debugMode
     )
+
+    const catalogService = new PluginCatalogService()
+    const profileService = new PluginProfileService()
+    pluginService = new PluginService(catalogService, profileService, {
+      getInstallation: () => controller?.currentInstallation ?? null,
+      stop: (detail) => controller?.stopDshForPluginOperation(detail) ?? Promise.resolve(),
+      restart: () =>
+        controller?.restartDshAfterPluginOperation() ?? Promise.reject(new Error('主控制器尚未就绪'))
+    })
+
+    const isMainSender = (sender: Electron.WebContents): boolean =>
+      controller?.mainBrowserWindow?.webContents === sender
+    const requireMainSender = (sender: Electron.WebContents): void => {
+      if (!isMainSender(sender)) throw new Error('该操作只能从桌面主窗口发起')
+    }
+
+    pluginService.subscribe((state) => {
+      const window = controller?.mainBrowserWindow
+      if (!window || window.webContents.isDestroyed()) return
+      window.webContents.send(pluginChannels.operationState, state)
+    })
 
     ipcMain.on(launcherChannels.requestState, (event) => {
       event.sender.send(launcherChannels.state, controller?.currentState)
@@ -114,6 +149,84 @@ if (!hasSingleInstanceLock) {
     ipcMain.on(launcherChannels.retry, () => void controller?.start())
     ipcMain.on(launcherChannels.openDsh, () => controller?.openDsh())
     ipcMain.on(launcherChannels.exit, () => app.quit())
+
+    ipcMain.on(mainChannels.section, (event, section: MainSection) => {
+      if (!isMainSender(event.sender)) return
+      if (section !== 'dsh' && section !== 'market' && section !== 'installed') return
+      controller?.setMainSection(section)
+    })
+    ipcMain.on(mainChannels.requestRuntimeState, (event) => {
+      if (!isMainSender(event.sender)) return
+      event.sender.send(mainChannels.runtimeState, controller?.currentRuntimeState)
+    })
+    ipcMain.handle(mainChannels.restart, async (event) => {
+      requireMainSender(event.sender)
+      await controller?.stopDshForPluginOperation('正在重新启动 DSH')
+      await controller?.restartDshAfterPluginOperation()
+    })
+    ipcMain.on(pluginChannels.requestOperationState, (event) => {
+      if (!isMainSender(event.sender)) return
+      event.sender.send(pluginChannels.operationState, pluginService?.currentState)
+    })
+
+    ipcMain.handle(pluginChannels.catalog, async (event, refresh: unknown) => {
+      requireMainSender(event.sender)
+      return catalogService.getCatalog(refresh === true)
+    })
+    ipcMain.handle(pluginChannels.installed, async (event) => {
+      requireMainSender(event.sender)
+      return pluginService?.listInstalled() ?? []
+    })
+    ipcMain.handle(pluginChannels.install, async (event, catalogId: unknown) => {
+      requireMainSender(event.sender)
+      if (typeof catalogId !== 'string') throw new Error('无效的插件目录 ID')
+      const plugin = await catalogService.getPlugin(catalogId)
+      const window = controller?.mainBrowserWindow
+      if (!window) throw new Error('桌面主窗口尚未就绪')
+      const result = await dialog.showMessageBox(window, {
+        type: 'warning',
+        title: '安装第三方插件',
+        message: `确认安装 ${plugin.name}？`,
+        detail:
+          `来源：${plugin.source === 'npm' ? plugin.npmPackage : plugin.repositoryUrl}\n\n` +
+          'DSH 插件会在本机 Node.js 进程中运行，能够访问文件、网络和环境变量。仅安装你信任的插件。',
+        buttons: ['安装并重启 DSH', '取消'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true
+      })
+      if (result.response !== 0) return { status: 'cancelled' } as const
+      await pluginService?.install(catalogId)
+      return { status: 'completed' } as const
+    })
+    ipcMain.handle(pluginChannels.remove, async (event, packageName: unknown) => {
+      requireMainSender(event.sender)
+      if (typeof packageName !== 'string') throw new Error('无效的插件包名')
+      const installed = await pluginService?.listInstalled()
+      const plugin = installed?.find((item) => item.packageName === packageName)
+      if (!plugin) throw new Error('该插件不在当前 web profile 中')
+      const window = controller?.mainBrowserWindow
+      if (!window) throw new Error('桌面主窗口尚未就绪')
+      const result = await dialog.showMessageBox(window, {
+        type: 'warning',
+        title: '卸载插件',
+        message: `确认卸载 ${plugin.packageName}？`,
+        detail: '卸载过程中会停止并重新启动 DSH Web UI。插件自己的外部数据可能不会被删除。',
+        buttons: ['卸载并重启 DSH', '取消'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true
+      })
+      if (result.response !== 0) return { status: 'cancelled' } as const
+      await pluginService?.remove(packageName)
+      return { status: 'completed' } as const
+    })
+    ipcMain.handle(pluginChannels.openCatalogPlugin, async (event, catalogId: unknown) => {
+      requireMainSender(event.sender)
+      if (typeof catalogId !== 'string') throw new Error('无效的插件目录 ID')
+      const plugin = await catalogService.getPlugin(catalogId)
+      await shell.openExternal(plugin.repositoryUrl)
+    })
 
     void controller.start()
   })

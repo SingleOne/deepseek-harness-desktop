@@ -1,7 +1,8 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { bindDshOutput, spawnDshCommand } from './dsh-command'
 import { runNpmChecked } from './npm-command'
 
 const DSH_PACKAGE = '@deepseek-ai/dsh'
@@ -18,20 +19,6 @@ export interface DshInstallation {
 }
 
 type OutputLine = (line: string) => void
-
-const runnerSource = String.raw`
-import { pathToFileURL } from 'node:url';
-const entryPath = process.env.DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY;
-if (!entryPath) throw new Error('Missing DSH entry path');
-const appArgs = process.argv.slice(1);
-process.argv = [process.execPath, entryPath, ...appArgs];
-process.on('message', (message) => {
-  if (message && message.type === 'deepseek-harness-desktop:shutdown') {
-    process.emit('SIGTERM', 'SIGTERM');
-  }
-});
-await import(pathToFileURL(entryPath).href);
-`
 
 function resolveBinPath(manifest: DshPackageManifest): string | undefined {
   if (typeof manifest.bin === 'string') return manifest.bin
@@ -109,56 +96,18 @@ export function startDsh(
   workingDirectory: string,
   onLine: (line: string) => void
 ): ChildProcess {
-  onLine(`$ node --input-type=module --eval <desktop-runner> -- web --host 127.0.0.1 --port ${port}`)
   onLine(`[环境] DSH 工作目录：${workingDirectory}`)
   onLine(`[环境] ELECTRON_RUN_AS_NODE=${process.env.ELECTRON_RUN_AS_NODE ?? '未设置'}`)
   onLine(`[环境] NODE_OPTIONS=${process.env.NODE_OPTIONS ?? '未设置'}`)
   onLine(`[环境] DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY=${installation.entryPath}`)
   onLine(`[环境] Node 可执行文件：${installation.nodePath ?? 'node（PATH）'}`)
-  const child = spawn(
-    installation.nodePath ?? 'node',
-    [
-      '--input-type=module',
-      '--eval',
-      runnerSource,
-      '--',
-      'web',
-      '--host',
-      '127.0.0.1',
-      '--port',
-      String(port)
-    ],
-    {
-      cwd: workingDirectory,
-      env: {
-        ...process.env,
-        DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY: installation.entryPath
-      },
-      // Keep the DSH child independent from Electron's IPC channel. The
-      // desktop launcher only needs its stdout/stderr and can terminate it
-      // directly on shutdown.
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true
-    }
+  const child = spawnDshCommand(
+    installation,
+    ['web', '--host', '127.0.0.1', '--port', String(port)],
+    workingDirectory,
+    onLine
   )
-
-  const bindOutput = (stream: NodeJS.ReadableStream | null, streamName: 'stdout' | 'stderr'): void => {
-    let remainder = ''
-    stream?.on('data', (chunk: Buffer) => {
-      remainder += chunk.toString('utf8')
-      const lines = remainder.split(/\r?\n/)
-      remainder = lines.pop() ?? ''
-      lines.forEach((line) => line.trim() && onLine(`[${streamName}] ${line.trim()}`))
-    })
-    stream?.on('end', () => remainder.trim() && onLine(`[${streamName}] ${remainder.trim()}`))
-  }
-
-  bindOutput(child.stdout, 'stdout')
-  bindOutput(child.stderr, 'stderr')
-  child.once('spawn', () => onLine(`[进程] DSH 子进程已创建：pid=${child.pid ?? '未知'}`))
-  child.once('exit', (exitCode, signal) => {
-    onLine(`[进程] DSH 子进程结束：退出码=${exitCode ?? '未知'}，信号=${signal ?? '无'}`)
-  })
+  bindDshOutput(child, onLine)
   return child
 }
 

@@ -56,7 +56,7 @@ function VersionValue({ value, fallback }: { value?: string; fallback: string })
   return <strong>{value ?? fallback}</strong>
 }
 
-export function App() {
+export function LauncherApp() {
   const [state, setState] = useState<LauncherState>(initialState)
   const activityRef = useRef<HTMLDivElement>(null)
 
@@ -199,7 +199,7 @@ export function App() {
       </section>
 
       <footer className="footer-note">
-        DSH 功能和数据均由官方 DSH 提供，dsh-desktop 不保存配置。
+        桌面端不保存模型凭据和会话；插件状态由 DSH web profile 管理。
       </footer>
     </main>
   )

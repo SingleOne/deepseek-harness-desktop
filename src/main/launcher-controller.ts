@@ -3,6 +3,8 @@ import type { ChildProcess } from 'node:child_process'
 import semver from 'semver'
 import type { LauncherState } from '../shared/launcher'
 import { launcherChannels } from '../shared/launcher'
+import type { DshRuntimeState, MainSection } from '../shared/plugin-market'
+import { mainChannels } from '../shared/plugin-market'
 import { checkDesktopUpdate } from './desktop-update'
 import {
   getInstalledDsh,
@@ -14,8 +16,9 @@ import {
   type DshInstallation
 } from './dsh-service'
 import { findAvailablePort } from './port'
+import type { MainWindowHandle } from './windows'
 
-type DshWindowFactory = (url: string, options: { keepLauncherVisible: boolean }) => BrowserWindow
+type MainWindowFactory = () => MainWindowHandle
 
 export class LauncherController {
   private state: LauncherState = {
@@ -27,14 +30,20 @@ export class LauncherController {
   }
 
   private running = false
+  private restartingRuntime = false
   private quitting = false
   private dshProcess: ChildProcess | null = null
-  private dshWindow: BrowserWindow | null = null
+  private installation: DshInstallation | null = null
+  private mainWindow: MainWindowHandle | null = null
+  private runtimeState: DshRuntimeState = {
+    phase: 'stopped',
+    detail: 'DSH 尚未启动'
+  }
   private readonly debugMode: boolean
 
   constructor(
     private readonly launcherWindow: BrowserWindow,
-    private readonly createDshWindow: DshWindowFactory,
+    private readonly createMainWindow: MainWindowFactory,
     debugMode: boolean
   ) {
     this.debugMode = debugMode
@@ -44,11 +53,35 @@ export class LauncherController {
     return this.state
   }
 
+  get currentRuntimeState(): DshRuntimeState {
+    return this.runtimeState
+  }
+
+  get currentInstallation(): DshInstallation | null {
+    return this.installation
+  }
+
+  get mainBrowserWindow(): BrowserWindow | null {
+    const window = this.mainWindow?.window
+    return window && !window.isDestroyed() ? window : null
+  }
+
   openDsh(): void {
-    if (!this.dshWindow || this.dshWindow.isDestroyed()) return
-    if (this.dshWindow.isMinimized()) this.dshWindow.restore()
-    this.dshWindow.show()
-    this.dshWindow.focus()
+    this.openMainSection('dsh')
+  }
+
+  openMainSection(section: MainSection): void {
+    const handle = this.mainWindow
+    if (!handle || handle.window.isDestroyed()) return
+    handle.setSection(section)
+    if (handle.window.isMinimized()) handle.window.restore()
+    handle.window.show()
+    handle.window.focus()
+    handle.window.webContents.send(mainChannels.navigate, section)
+  }
+
+  setMainSection(section: MainSection): void {
+    this.mainWindow?.setSection(section)
   }
 
   async start(): Promise<void> {
@@ -62,11 +95,20 @@ export class LauncherController {
       await this.runDesktopUpdateCheck()
       const installation = await this.prepareDsh()
       if (!installation) return
+      this.installation = installation
+      this.ensureMainWindow()
       await this.launchDsh(installation)
     } catch (error) {
       await this.stopCurrentDsh()
       const message = error instanceof Error ? error.message : String(error)
       this.appendLog(message, 'error')
+      if (this.mainBrowserWindow) {
+        this.setRuntimeState({
+          phase: 'error',
+          detail: message,
+          version: this.installation?.version
+        })
+      }
       this.setState({
         phase: 'error',
         title: '启动失败',
@@ -79,7 +121,29 @@ export class LauncherController {
 
   async shutdown(): Promise<void> {
     this.quitting = true
+    this.mainWindow?.setDshReady(false)
     await this.stopCurrentDsh()
+  }
+
+  async stopDshForPluginOperation(detail: string): Promise<void> {
+    this.mainWindow?.setDshReady(false)
+    this.setRuntimeState({
+      phase: 'stopped',
+      detail,
+      version: this.installation?.version
+    })
+    await this.stopCurrentDsh()
+  }
+
+  async restartDshAfterPluginOperation(): Promise<void> {
+    if (!this.installation) throw new Error('尚未找到可用的 DSH 安装')
+    if (this.restartingRuntime) throw new Error('DSH 正在重新启动')
+    this.restartingRuntime = true
+    try {
+      await this.launchDsh(this.installation)
+    } finally {
+      this.restartingRuntime = false
+    }
   }
 
   sendState(window = this.launcherWindow): void {
@@ -93,6 +157,11 @@ export class LauncherController {
       const message = error instanceof Error ? error.message : String(error)
       console.warn(`启动状态暂时无法发送到界面：${message}`)
     }
+  }
+
+  sendRuntimeState(window = this.mainBrowserWindow): void {
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return
+    window.webContents.send(mainChannels.runtimeState, this.runtimeState)
   }
 
   private async runDesktopUpdateCheck(): Promise<void> {
@@ -193,6 +262,11 @@ export class LauncherController {
       detail: `正在启动已安装的 DSH ${installation.version}`,
       installedDshVersion: installation.version
     })
+    this.setRuntimeState({
+      phase: 'starting',
+      detail: `正在启动 DSH ${installation.version}`,
+      version: installation.version
+    })
 
     this.dshProcess = startDsh(
       installation,
@@ -209,23 +283,19 @@ export class LauncherController {
     })
 
     await waitForDsh(url, this.dshProcess, 60_000, (line) => this.appendDetailedLog(line))
-    this.dshWindow = this.createDshWindow(url, {
-      keepLauncherVisible: this.debugMode
-    })
+    const mainWindow = this.ensureMainWindow()
+    await mainWindow.loadDsh(url)
 
     const processAtLaunch = this.dshProcess
     processAtLaunch.once('exit', (exitCode) => {
-      if (this.quitting || !this.dshWindow || this.dshWindow.isDestroyed()) return
-      void dialog
-        .showMessageBox(this.dshWindow, {
-          type: 'error',
-          title: 'DSH 已退出',
-          message: 'DSH 服务已停止',
-          detail: `退出码：${exitCode ?? '未知'}`,
-          buttons: ['退出'],
-          noLink: true
-        })
-        .finally(() => app.quit())
+      if (this.quitting || processAtLaunch !== this.dshProcess) return
+      this.dshProcess = null
+      this.mainWindow?.setDshReady(false)
+      this.setRuntimeState({
+        phase: 'error',
+        detail: `DSH 服务已停止，退出码：${exitCode ?? '未知'}`,
+        version: installation.version
+      })
     })
 
     this.setState({
@@ -235,8 +305,12 @@ export class LauncherController {
         ? 'DSH Web UI 已启动，可先查看右侧完整日志，再进入官方页面。'
         : 'DSH Web UI 已启动，正在进入官方页面。'
     })
-
-    if (!this.debugMode) this.showDshAndCloseLauncher()
+    this.setRuntimeState({
+      phase: 'ready',
+      detail: url,
+      version: installation.version
+    })
+    if (!this.debugMode) this.showMainAndCloseLauncher()
   }
 
   private async askToInstallDsh(version: string): Promise<boolean> {
@@ -314,18 +388,34 @@ export class LauncherController {
     this.appendLog('[结果] DSH 子进程已停止')
   }
 
-  private showDshAndCloseLauncher(): void {
-    const dshWindow = this.dshWindow
-    if (!dshWindow || dshWindow.isDestroyed()) return
+  private ensureMainWindow(): MainWindowHandle {
+    if (this.mainWindow && !this.mainWindow.window.isDestroyed()) return this.mainWindow
+    const handle = this.createMainWindow()
+    this.mainWindow = handle
+    handle.window.once('closed', () => {
+      if (this.mainWindow === handle) this.mainWindow = null
+    })
+    if (!this.debugMode) this.showMainAndCloseLauncher()
+    return handle
+  }
+
+  private showMainAndCloseLauncher(): void {
+    const mainWindow = this.mainWindow?.window
+    if (!mainWindow || mainWindow.isDestroyed()) return
 
     const show = (): void => {
-      if (dshWindow.isDestroyed()) return
-      dshWindow.show()
-      dshWindow.focus()
+      if (mainWindow.isDestroyed()) return
+      mainWindow.show()
+      mainWindow.focus()
       if (!this.launcherWindow.isDestroyed()) this.launcherWindow.destroy()
     }
 
-    if (dshWindow.isVisible()) show()
-    else dshWindow.once('ready-to-show', show)
+    if (mainWindow.isVisible()) show()
+    else mainWindow.once('ready-to-show', show)
+  }
+
+  private setRuntimeState(state: DshRuntimeState): void {
+    this.runtimeState = state
+    this.sendRuntimeState()
   }
 }
