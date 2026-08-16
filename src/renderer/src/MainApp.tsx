@@ -34,6 +34,7 @@ const initialOperation: PluginOperationState = {
 const activeOperationPhases = new Set<PluginOperationState['phase']>([
   'stopping-dsh',
   'installing',
+  'awaiting-build-approval',
   'removing',
   'validating',
   'restarting-dsh'

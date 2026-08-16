@@ -6,6 +6,8 @@
 
 The marketplace uses a community catalog for discovery, while all changes are delegated to the official `dsh plugin --profile web` command. The desktop shell does not store model credentials or sessions; plugins and their configuration are managed by the DSH web profile.
 
+Some GitHub plugins build during installation through a `prepare` script, which pnpm blocks by default. The desktop app verifies the repository and exact commit reported by pnpm, then—after a second user confirmation—adds only that key to the web profile's `allowBuilds` map and retries automatically. The approval does not apply to other dependencies or commits.
+
 ## Notification Center integration
 
 With the standalone [`dsh-notify-center`](https://github.com/SingleOne/dsh-notify-center) plugin installed, the desktop app starts an authenticated notification bridge bound only to `127.0.0.1`. Its random endpoint and ephemeral token are injected only into the DSH Web child process launched by this app. The plugin owns notification rules, settings UI, native fallback notifications, and webhook delivery; the desktop app only presents Electron system notifications and restores and navigates the window when a notification is clicked.

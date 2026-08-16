@@ -47,6 +47,7 @@ export type PluginOperationPhase =
   | 'idle'
   | 'stopping-dsh'
   | 'installing'
+  | 'awaiting-build-approval'
   | 'removing'
   | 'validating'
   | 'restarting-dsh'

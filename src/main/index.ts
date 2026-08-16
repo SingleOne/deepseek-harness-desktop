@@ -12,6 +12,7 @@ import { startNotificationBridge, type NotificationBridge } from './notification
 import { PluginCatalogService } from './plugin-catalog-service'
 import { PluginProfileService } from './plugin-profile-service'
 import { PluginService } from './plugin-service'
+import type { PnpmGitBuildApproval } from './pnpm-build-policy'
 import { applicationIcon, createLauncherWindow, createMainWindow } from './windows'
 
 const runtimeDataDirectory = path.join(os.tmpdir(), 'deepseek-harness-desktop', String(process.pid))
@@ -164,7 +165,29 @@ if (!hasSingleInstanceLock) {
       getInstallation: () => controller?.currentInstallation ?? null,
       stop: (detail) => controller?.stopDshForPluginOperation(detail) ?? Promise.resolve(),
       restart: () =>
-        controller?.restartDshAfterPluginOperation() ?? Promise.reject(new Error('主控制器尚未就绪'))
+        controller?.restartDshAfterPluginOperation() ?? Promise.reject(new Error('主控制器尚未就绪')),
+      confirmGitBuild: async (
+        pluginName: string,
+        approval: PnpmGitBuildApproval
+      ): Promise<boolean> => {
+        const window = controller?.mainBrowserWindow
+        if (!window) throw new Error('桌面主窗口尚未就绪')
+        const result = await dialog.showMessageBox(window, {
+          type: 'warning',
+          title: '允许插件构建脚本',
+          message: `${pluginName} 需要在安装时执行构建脚本`,
+          detail:
+            `包：${approval.packageName}\n` +
+            `来源：${approval.repositoryUrl}\n` +
+            `提交：${approval.revision.slice(0, 12)}\n\n` +
+            'pnpm 必须运行该 GitHub 插件的 prepare 脚本才能完成安装。构建脚本以当前用户权限运行，可以访问本机文件和网络。仅在你信任该仓库时允许。',
+          buttons: ['允许并重试', '取消安装'],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true
+        })
+        return result.response === 0
+      }
     })
 
     const isMainSender = (sender: Electron.WebContents): boolean =>
@@ -232,8 +255,9 @@ if (!hasSingleInstanceLock) {
         noLink: true
       })
       if (result.response !== 0) return { status: 'cancelled' } as const
-      await pluginService?.install(catalogId)
-      return { status: 'completed' } as const
+      if (!pluginService) throw new Error('插件服务尚未就绪')
+      const completed = await pluginService.install(catalogId)
+      return { status: completed ? 'completed' : 'cancelled' } as const
     })
     ipcMain.handle(pluginChannels.remove, async (event, packageName: unknown) => {
       requireMainSender(event.sender)

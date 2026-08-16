@@ -2,6 +2,10 @@ import { homedir } from 'node:os'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { InstalledPlugin } from '../shared/plugin-market'
+import {
+  allowPnpmBuild,
+  type PnpmGitBuildApproval
+} from './pnpm-build-policy'
 
 const packageNamePattern = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/
 
@@ -75,6 +79,10 @@ export class PluginProfileService {
           : []
       )
     )
+  }
+
+  allowBuild(approval: PnpmGitBuildApproval): Promise<boolean> {
+    return allowPnpmBuild(this.profileDirectory, approval)
   }
 
   async listInstalled(): Promise<InstalledPlugin[]> {
