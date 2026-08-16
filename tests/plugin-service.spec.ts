@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PluginCatalogService, ResolvedCatalogItem } from '../src/main/plugin-catalog-service'
 import type { PluginProfileService } from '../src/main/plugin-profile-service'
+import type { PnpmRuntime } from '../src/main/pnpm-runtime'
 import type { PnpmGitBuildApproval } from '../src/main/pnpm-build-policy'
 
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\Users\\tester' } }))
@@ -26,7 +27,7 @@ const plugin: ResolvedCatalogItem = {
   installSpec: 'github:0xsline/dsh-spotlight'
 }
 
-function fixture(approved: boolean) {
+function fixture(approved: boolean, pnpmRuntime?: PnpmRuntime) {
   const catalog = {
     getPlugin: vi.fn().mockResolvedValue(plugin),
     getCatalog: vi.fn().mockResolvedValue({}),
@@ -49,7 +50,12 @@ function fixture(approved: boolean) {
     confirmGitBuild: vi.fn<(name: string, approval: PnpmGitBuildApproval) => Promise<boolean>>()
       .mockResolvedValue(approved)
   }
-  return { catalog, profile, runtime, service: new PluginService(catalog, profile, runtime) }
+  return {
+    catalog,
+    profile,
+    runtime,
+    service: new PluginService(catalog, profile, runtime, pnpmRuntime)
+  }
 }
 
 beforeEach(() => {
@@ -80,5 +86,53 @@ describe('plugin installation build approval', () => {
     expect(runDshCommandChecked).toHaveBeenCalledOnce()
     expect(runtime.restart).toHaveBeenCalledOnce()
     expect(service.currentState.phase).toBe('idle')
+  })
+
+  it('injects bundled pnpm for both install and remove commands', async () => {
+    vi.mocked(runDshCommandChecked).mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    const bundled: PnpmRuntime = {
+      source: 'bundled',
+      version: '11.22.0',
+      binDirectory: 'C:\\app\\resources\\pnpm-bin'
+    }
+    const { service } = fixture(true, bundled)
+
+    await expect(service.install(plugin.id)).resolves.toBe(true)
+    expect(runDshCommandChecked).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      ['plugin', '--profile', 'web', 'add', plugin.installSpec],
+      expect.any(String),
+      expect.any(Function),
+      {
+        environment: { DEEPSEEK_HARNESS_DESKTOP_NODE: 'node' },
+        prependPath: ['C:\\app\\resources\\pnpm-bin']
+      }
+    )
+
+    vi.mocked(runDshCommandChecked).mockClear()
+    await expect(service.remove('@0xsline/dsh-spotlight')).resolves.toBeUndefined()
+    expect(runDshCommandChecked).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      ['plugin', '--profile', 'web', 'remove', '@0xsline/dsh-spotlight'],
+      expect.any(String),
+      expect.any(Function),
+      {
+        environment: { DEEPSEEK_HARNESS_DESKTOP_NODE: 'node' },
+        prependPath: ['C:\\app\\resources\\pnpm-bin']
+      }
+    )
+  })
+
+  it('fails before stopping DSH when neither system nor bundled pnpm is usable', async () => {
+    const { runtime, service } = fixture(true, {
+      source: 'unavailable',
+      error: 'pnpm unavailable for test'
+    })
+
+    await expect(service.install(plugin.id)).rejects.toThrow('pnpm unavailable for test')
+    expect(runtime.stop).not.toHaveBeenCalled()
+    expect(runDshCommandChecked).not.toHaveBeenCalled()
   })
 })

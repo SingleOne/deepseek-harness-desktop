@@ -12,6 +12,7 @@ import { startNotificationBridge, type NotificationBridge } from './notification
 import { PluginCatalogService } from './plugin-catalog-service'
 import { PluginProfileService } from './plugin-profile-service'
 import { PluginService } from './plugin-service'
+import { bundledPnpmBinDirectory, selectPnpmRuntime } from './pnpm-runtime'
 import type { PnpmGitBuildApproval } from './pnpm-build-policy'
 import { applicationIcon, createLauncherWindow, createMainWindow } from './windows'
 
@@ -161,6 +162,20 @@ if (!hasSingleInstanceLock) {
 
     const catalogService = new PluginCatalogService()
     const profileService = new PluginProfileService()
+    const pnpmRuntime = selectPnpmRuntime(
+      bundledPnpmBinDirectory({
+        isPackaged: app.isPackaged,
+        appPath: app.getAppPath(),
+        resourcesPath: process.resourcesPath
+      })
+    )
+    if (pnpmRuntime.source === 'unavailable') {
+      console.error(`pnpm 运行时不可用：${pnpmRuntime.error}`)
+    } else {
+      console.info(
+        `pnpm 运行时：${pnpmRuntime.source === 'bundled' ? '桌面 App 内置' : '系统 PATH'} ${pnpmRuntime.version ?? ''}`.trim()
+      )
+    }
     pluginService = new PluginService(catalogService, profileService, {
       getInstallation: () => controller?.currentInstallation ?? null,
       stop: (detail) => controller?.stopDshForPluginOperation(detail) ?? Promise.resolve(),
@@ -188,7 +203,7 @@ if (!hasSingleInstanceLock) {
         })
         return result.response === 0
       }
-    })
+    }, pnpmRuntime)
 
     const isMainSender = (sender: Electron.WebContents): boolean =>
       controller?.mainBrowserWindow?.webContents === sender

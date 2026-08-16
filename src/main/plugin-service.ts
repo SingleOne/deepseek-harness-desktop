@@ -4,9 +4,10 @@ import type {
   InstalledPlugin,
   PluginOperationState
 } from '../shared/plugin-market'
-import { runDshCommandChecked } from './dsh-command'
+import { runDshCommandChecked, type DshCommandOptions } from './dsh-command'
 import { PluginCatalogService, type ResolvedCatalogItem } from './plugin-catalog-service'
 import { PluginProfileService } from './plugin-profile-service'
+import type { PnpmRuntime } from './pnpm-runtime'
 import {
   parsePnpmGitBuildApproval,
   type PnpmGitBuildApproval
@@ -39,7 +40,8 @@ export class PluginService {
   constructor(
     private readonly catalog: PluginCatalogService,
     private readonly profile: PluginProfileService,
-    private readonly runtime: PluginRuntimeHooks
+    private readonly runtime: PluginRuntimeHooks,
+    private readonly pnpmRuntime: PnpmRuntime = { source: 'system' }
   ) {}
 
   get currentState(): PluginOperationState {
@@ -69,9 +71,11 @@ export class PluginService {
     this.busy = true
     let plugin: ResolvedCatalogItem
     let installation: DshInstallation
+    let pnpmOptions: DshCommandOptions
     try {
       plugin = await this.catalog.getPlugin(catalogId)
       installation = this.requireInstallation()
+      pnpmOptions = this.requirePnpm(installation)
     } catch (error) {
       this.busy = false
       throw error
@@ -83,6 +87,7 @@ export class PluginService {
       detail: '正在停止 DSH，以安全修改 web profile',
       logs: []
     })
+    this.appendPnpmLog()
 
     let operationError: unknown
     let cancelled = false
@@ -90,7 +95,7 @@ export class PluginService {
       const beforeDependencies = await this.profile.listDirectDependencies()
       await this.runtime.stop(`正在安装 ${plugin.name}`)
       this.setState({ phase: 'installing', detail: `正在安装 ${plugin.name}` })
-      await this.addPlugin(installation, plugin)
+      await this.addPlugin(installation, plugin, pnpmOptions)
 
       const installed = await this.listInstalled()
       const validPlugin = installed.some(
@@ -109,7 +114,8 @@ export class PluginService {
             installation,
             ['plugin', '--profile', 'web', 'remove', packageName],
             app.getPath('home'),
-            (line) => this.appendLog(line)
+            (line) => this.appendLog(line),
+            pnpmOptions
           )
         }
         throw new Error('安装包没有作为有效的 DSH bundle 加入 web profile')
@@ -154,12 +160,14 @@ export class PluginService {
     this.busy = true
     let plugin: InstalledPlugin
     let installation: DshInstallation
+    let pnpmOptions: DshCommandOptions
     try {
       const installed = await this.listInstalled()
       const found = installed.find((item) => item.packageName === packageName)
       if (!found) throw new Error('该包不在当前 web profile 的可管理插件列表中')
       plugin = found
       installation = this.requireInstallation()
+      pnpmOptions = this.requirePnpm(installation)
     } catch (error) {
       this.busy = false
       throw error
@@ -171,6 +179,7 @@ export class PluginService {
       detail: '正在停止 DSH，以安全修改 web profile',
       logs: []
     })
+    this.appendPnpmLog()
 
     let operationError: unknown
     try {
@@ -180,7 +189,8 @@ export class PluginService {
         installation,
         ['plugin', '--profile', 'web', 'remove', packageName],
         app.getPath('home'),
-        (line) => this.appendLog(line)
+        (line) => this.appendLog(line),
+        pnpmOptions
       )
       this.setState({ phase: 'validating', detail: '正在解析 web profile 配置' })
       await runDshCommandChecked(
@@ -212,9 +222,29 @@ export class PluginService {
     return installation
   }
 
+  private requirePnpm(installation: DshInstallation): DshCommandOptions {
+    if (this.pnpmRuntime.source === 'unavailable') {
+      throw new Error(this.pnpmRuntime.error ?? '没有可用的 pnpm，无法管理 DSH 插件')
+    }
+    return this.pnpmRuntime.binDirectory
+      ? {
+          environment: {
+            DEEPSEEK_HARNESS_DESKTOP_NODE: installation.nodePath ?? 'node'
+          },
+          prependPath: [this.pnpmRuntime.binDirectory]
+        }
+      : {}
+  }
+
+  private appendPnpmLog(): void {
+    const source = this.pnpmRuntime.source === 'bundled' ? '桌面 App 内置' : '系统 PATH'
+    this.appendLog(`[环境] pnpm ${this.pnpmRuntime.version ?? '版本未知'}（${source}）`)
+  }
+
   private async addPlugin(
     installation: DshInstallation,
-    plugin: ResolvedCatalogItem
+    plugin: ResolvedCatalogItem,
+    pnpmOptions: DshCommandOptions
   ): Promise<void> {
     const prompted = new Set<string>()
     while (true) {
@@ -223,7 +253,8 @@ export class PluginService {
           installation,
           ['plugin', '--profile', 'web', 'add', plugin.installSpec],
           app.getPath('home'),
-          (line) => this.appendLog(line)
+          (line) => this.appendLog(line),
+          pnpmOptions
         )
         return
       } catch (error) {

@@ -30,6 +30,7 @@
     "electron": "43.4.0",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
+    "pnpm": "11.22.0",
     "typescript": "7.0.2",
     "vite": "7.3.6",
     "vitest": "^4.1.10"
@@ -45,6 +46,22 @@
       "out/**/*",
       "resources/icon.png",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/pnpm",
+        "to": "pnpm",
+        "filter": [
+          "bin/**/*",
+          "dist/**/*",
+          "LICENSE",
+          "package.json"
+        ]
+      },
+      {
+        "from": "resources/pnpm-bin",
+        "to": "pnpm-bin"
+      }
     ],
     "asar": true,
     "win": {

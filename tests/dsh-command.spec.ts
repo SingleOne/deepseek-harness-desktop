@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import path from 'node:path'
 import { buildDshCommandEnvironment } from '../src/main/dsh-command'
 
 describe('DSH command environment', () => {
@@ -39,5 +40,22 @@ describe('DSH command environment', () => {
 
     expect(environment.DSH_NOTIFY_BRIDGE_URL).toBeUndefined()
     expect(environment.DSH_NOTIFY_BRIDGE_TOKEN).toBeUndefined()
+  })
+
+  it('prepends the bundled tool directory without retaining duplicate PATH keys', () => {
+    const environment = buildDshCommandEnvironment(
+      { version: 'test', entryPath: 'C:\\dsh\\cli.js' },
+      { prependPath: ['C:\\app\\pnpm-bin'] },
+      {
+        Path: 'C:\\Windows\\System32',
+        KEEP_ME: 'present'
+      }
+    )
+
+    expect(environment.Path).toBeUndefined()
+    expect(environment.PATH).toBe(
+      ['C:\\app\\pnpm-bin', 'C:\\Windows\\System32'].join(path.delimiter)
+    )
+    expect(environment.KEEP_ME).toBe('present')
   })
 })

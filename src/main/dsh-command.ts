@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process'
+import path from 'node:path'
 import type { DshInstallation } from './dsh-service'
 
 type OutputLine = (line: string) => void
@@ -13,6 +14,7 @@ export interface DshCommandOptions {
   timeoutMs?: number
   environment?: Readonly<Record<string, string>>
   removeEnvironment?: readonly string[]
+  prependPath?: readonly string[]
 }
 
 const runnerSource = String.raw`
@@ -35,12 +37,18 @@ function displayArgument(argument: string): string {
 
 export function buildDshCommandEnvironment(
   installation: DshInstallation,
-  options: Pick<DshCommandOptions, 'environment' | 'removeEnvironment'> = {},
+  options: Pick<DshCommandOptions, 'environment' | 'removeEnvironment' | 'prependPath'> = {},
   baseEnvironment: NodeJS.ProcessEnv = process.env
 ): NodeJS.ProcessEnv {
   const environment = { ...baseEnvironment }
   for (const name of options.removeEnvironment ?? []) delete environment[name]
   Object.assign(environment, options.environment)
+  if (options.prependPath?.length) {
+    const pathKeys = Object.keys(environment).filter((name) => name.toLowerCase() === 'path')
+    const inheritedPath = pathKeys.map((name) => environment[name]).find(Boolean)
+    pathKeys.forEach((name) => delete environment[name])
+    environment.PATH = [...options.prependPath, inheritedPath].filter(Boolean).join(path.delimiter)
+  }
   environment.DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY = installation.entryPath
   return environment
 }
@@ -50,7 +58,7 @@ export function spawnDshCommand(
   args: string[],
   workingDirectory: string,
   onLine?: OutputLine,
-  options: Pick<DshCommandOptions, 'environment' | 'removeEnvironment'> = {}
+  options: Pick<DshCommandOptions, 'environment' | 'removeEnvironment' | 'prependPath'> = {}
 ): ChildProcess {
   onLine?.(`$ dsh ${args.map(displayArgument).join(' ')}`)
   const environment = buildDshCommandEnvironment(installation, options)
