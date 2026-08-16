@@ -394,14 +394,6 @@ button {
   -webkit-app-region: drag;
 }
 
-.main-titlebar-context {
-  margin-left: 14px;
-  padding-left: 14px;
-  border-left: 1px solid #263b56;
-  color: #71849d;
-  font-size: 12px;
-}
-
 .main-sidebar {
   position: fixed;
   z-index: 15;

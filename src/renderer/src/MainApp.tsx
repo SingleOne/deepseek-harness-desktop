@@ -171,9 +171,6 @@ export function MainApp() {
     <main className="main-shell">
       <header className="main-titlebar">
         <span className="product-name">dsh-desktop</span>
-        <span className="main-titlebar-context">
-          {section === 'dsh' ? 'DeepSeek Harness' : section === 'market' ? '插件市场' : '已安装插件'}
-        </span>
       </header>
 
       <aside className="main-sidebar">
