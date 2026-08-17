@@ -46,3 +46,7 @@ npm run dev:debug
 npm run check
 npm run package:win
 ```
+
+## 鸣谢
+
+[linux.do](https://linux.do)
