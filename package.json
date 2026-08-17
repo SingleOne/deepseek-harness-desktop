@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test && npm run build",
-    "package:win": "npm run build && electron-builder --win nsis"
+    "package:win": "npm run build && electron-builder --win nsis",
+    "package:mac": "npm run build && electron-builder --mac"
   },
   "dependencies": {
     "lucide-react": "1.31.0",
@@ -42,6 +43,7 @@
     "directories": {
       "output": "release"
     },
+    "beforePack": "scripts/before-pack.cjs",
     "files": [
       "out/**/*",
       "resources/icon.png",
@@ -70,6 +72,19 @@
         {
           "target": "nsis",
           "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "mac": {
+      "icon": "resources/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
             "x64"
           ]
         }

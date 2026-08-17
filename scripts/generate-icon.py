@@ -172,6 +172,7 @@ def main() -> None:
     OUTPUT_DIRECTORY.mkdir(parents=True, exist_ok=True)
     icon = generate_icon()
     icon.save(OUTPUT_DIRECTORY / "icon.png", optimize=True)
+    icon.save(OUTPUT_DIRECTORY / "icon.icns", format="ICNS")
     icon.save(
         OUTPUT_DIRECTORY / "icon.ico",
         format="ICO",

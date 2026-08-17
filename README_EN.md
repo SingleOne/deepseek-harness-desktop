@@ -14,6 +14,10 @@ With the standalone [`dsh-notify-center`](https://github.com/SingleOne/dsh-notif
 
 If the bridge is unavailable or Electron notifications are unsupported, the plugin automatically falls back to its own Windows, macOS, or Linux notification implementation. The plugin therefore remains fully usable without this desktop app, and webhooks are always delivered directly by the plugin.
 
+## Requirements
+
+The desktop app requires Node.js 22.13 or later and npm. On macOS, it reads PATH from the login shell so that Node.js installations managed by Homebrew, nvm, and similar tools can be discovered.
+
 ## Development
 
 Node.js and npm are required.
@@ -27,4 +31,7 @@ npm run dev
 npm run dev:debug
 npm run check
 npm run package:win
+npm run package:mac
 ```
+
+`package:mac` must run on macOS. It produces separate Apple Silicon (arm64) and Intel (x64) DMG files in `release`. Public distribution also requires Apple Developer ID signing and notarization.

@@ -1,0 +1,6 @@
+#!/bin/sh
+
+SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PNPM_NODE=${DEEPSEEK_HARNESS_DESKTOP_NODE:-node}
+
+exec "$PNPM_NODE" "$SCRIPT_DIRECTORY/../pnpm/bin/pnpm.mjs" "$@"

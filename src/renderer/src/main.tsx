@@ -4,7 +4,11 @@ import { LauncherApp } from './App'
 import { MainApp } from './MainApp'
 import './styles.css'
 
-const isMainSurface = new URLSearchParams(window.location.search).get('surface') === 'main'
+const searchParams = new URLSearchParams(window.location.search)
+const platform = searchParams.get('platform')
+if (platform) document.documentElement.dataset.platform = platform
+
+const isMainSurface = searchParams.get('surface') === 'main'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

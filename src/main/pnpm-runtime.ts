@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
+import { commandEnvironment } from './command-environment'
 
 export type PnpmRuntimeSource = 'system' | 'bundled' | 'unavailable'
 
@@ -13,8 +14,8 @@ export interface PnpmRuntime {
 export type PnpmProbe = (binDirectory?: string) => string | undefined
 
 function environmentWithPnpmBin(binDirectory?: string): NodeJS.ProcessEnv {
-  if (!binDirectory) return { ...process.env }
-  const environment = { ...process.env }
+  const environment = commandEnvironment()
+  if (!binDirectory) return environment
   const pathKeys = Object.keys(environment).filter((name) => name.toLowerCase() === 'path')
   const inheritedPath = pathKeys.map((name) => environment[name]).find(Boolean)
   pathKeys.forEach((name) => delete environment[name])

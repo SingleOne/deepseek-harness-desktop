@@ -32,6 +32,10 @@ DSH 的插件命令会把依赖管理委托给 pnpm。桌面 App 启动后会先
 
 桥接不可用或系统不支持 Electron 通知时，插件会自动回退到自身的 Windows、macOS 或 Linux 原生通知。因此插件可以脱离本桌面 App 独立运行；Webhook 也始终由插件直接发送。
 
+## 运行要求
+
+桌面端需要系统中已安装 Node.js 22.13 或更高版本及 npm。macOS App 会读取登录 Shell 的 PATH，因此可以识别通过 Homebrew、nvm 等常见方式安装的 Node.js。
+
 ## 开发
 
 需要 Node.js 和 npm。
@@ -45,7 +49,10 @@ npm run dev
 npm run dev:debug
 npm run check
 npm run package:win
+npm run package:mac
 ```
+
+`package:mac` 需要在 macOS 上运行，会在 `release` 目录分别生成 Apple Silicon（arm64）和 Intel（x64）的 DMG。对外分发时还需要配置 Apple Developer ID 签名和 notarization。
 
 ## 鸣谢
 

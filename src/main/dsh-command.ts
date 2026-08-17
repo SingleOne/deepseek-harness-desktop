@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import path from 'node:path'
 import type { DshInstallation } from './dsh-service'
+import { commandEnvironment } from './command-environment'
 
 type OutputLine = (line: string) => void
 
@@ -61,7 +62,7 @@ export function spawnDshCommand(
   options: Pick<DshCommandOptions, 'environment' | 'removeEnvironment' | 'prependPath'> = {}
 ): ChildProcess {
   onLine?.(`$ dsh ${args.map(displayArgument).join(' ')}`)
-  const environment = buildDshCommandEnvironment(installation, options)
+  const environment = buildDshCommandEnvironment(installation, options, commandEnvironment())
   const child = spawn(
     installation.nodePath ?? 'node',
     ['--input-type=module', '--eval', runnerSource, '--', ...args],

@@ -1,4 +1,9 @@
-import { BrowserWindow, shell, WebContentsView } from 'electron'
+import {
+  BrowserWindow,
+  shell,
+  WebContentsView,
+  type BrowserWindowConstructorOptions
+} from 'electron'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { MainSection } from '../shared/plugin-market'
@@ -12,13 +17,38 @@ const mainNavigationHeight = 64
 function loadRenderer(window: BrowserWindow, surface?: 'main'): void {
   if (process.env.ELECTRON_RENDERER_URL) {
     const url = new URL(process.env.ELECTRON_RENDERER_URL)
+    url.searchParams.set('platform', process.platform)
     if (surface) url.searchParams.set('surface', surface)
     void window.loadURL(url.toString())
     return
   }
   void window.loadFile(path.join(currentDirectory, '../renderer/index.html'), {
-    query: surface ? { surface } : undefined
+    query: {
+      platform: process.platform,
+      ...(surface ? { surface } : {})
+    }
   })
+}
+
+function titlebarOptions(): Pick<
+  BrowserWindowConstructorOptions,
+  'titleBarStyle' | 'titleBarOverlay' | 'trafficLightPosition'
+> {
+  if (process.platform === 'darwin') {
+    return {
+      titleBarStyle: 'hidden',
+      trafficLightPosition: { x: 16, y: 14 }
+    }
+  }
+
+  return {
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#07111f',
+      symbolColor: '#d9e5f5',
+      height: titlebarHeight
+    }
+  }
 }
 
 export function createLauncherWindow(): BrowserWindow {
@@ -32,12 +62,7 @@ export function createLauncherWindow(): BrowserWindow {
     backgroundColor: '#07111f',
     icon: applicationIcon,
     title: 'dsh-desktop',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#07111f',
-      symbolColor: '#d9e5f5',
-      height: 44
-    },
+    ...titlebarOptions(),
     webPreferences: {
       preload: path.join(currentDirectory, '../preload/index.cjs'),
       partition: 'deepseek-harness-desktop-session',
@@ -76,12 +101,7 @@ export function createMainWindow(): MainWindowHandle {
     backgroundColor: '#07111f',
     icon: applicationIcon,
     title: 'DeepSeek Harness',
-    titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: '#07111f',
-      symbolColor: '#d9e5f5',
-      height: titlebarHeight
-    },
+    ...titlebarOptions(),
     webPreferences: {
       preload: path.join(currentDirectory, '../preload/index.cjs'),
       partition: 'deepseek-harness-desktop-shell',

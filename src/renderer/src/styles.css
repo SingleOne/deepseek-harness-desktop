@@ -59,6 +59,11 @@ button {
   -webkit-app-region: drag;
 }
 
+:root[data-platform="darwin"] .titlebar {
+  padding-right: 24px;
+  padding-left: 84px;
+}
+
 .product-name {
   color: #edf3fc;
   font-size: 13px;
@@ -392,6 +397,11 @@ button {
   border-bottom: 1px solid #1a2c44;
   background: #07111f;
   -webkit-app-region: drag;
+}
+
+:root[data-platform="darwin"] .main-titlebar {
+  padding-right: 20px;
+  padding-left: 84px;
 }
 
 .main-sidebar {

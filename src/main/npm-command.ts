@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { commandEnvironment } from './command-environment'
 
 export interface CommandResult {
   exitCode: number
@@ -13,9 +14,10 @@ export interface NpmCommandOptions {
 const safeNpmArgument = /^[a-zA-Z0-9@._+/:=-]+$/
 
 function createNpmProcess(args: string[]) {
+  const environment = commandEnvironment()
   if (process.platform !== 'win32') {
     return spawn('npm', args, {
-      env: process.env,
+      env: environment,
       windowsHide: true
     })
   }
@@ -26,7 +28,7 @@ function createNpmProcess(args: string[]) {
 
   const command = ['npm', ...args].join(' ')
   return spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command], {
-    env: process.env,
+    env: environment,
     windowsHide: true
   })
 }

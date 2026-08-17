@@ -50,6 +50,8 @@ if (!hasSingleInstanceLock) {
     window.focus()
   }
 
+  app.on('activate', restoreMainWindow)
+
   const minimizeToTrayOnClose = (window: BrowserWindow): void => {
     window.on('focus', () => {
       lastActiveWindow = window
