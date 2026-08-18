@@ -38,7 +38,6 @@ export interface PluginCatalogSnapshot {
 export interface InstalledPlugin {
   packageName: string
   version?: string
-  installedRevision?: string
   sourceSpec: string
   repositoryUrl?: string
   catalogId?: string
@@ -57,9 +56,8 @@ export interface PluginUpdateInfo {
   status: PluginUpdateStatus
   installedVersion?: string
   latestVersion?: string
-  installedRevision?: string
-  latestRevision?: string
   checkedAt: string
+  stale?: boolean
   error?: string
 }
 
@@ -70,18 +68,21 @@ export interface PluginUpdateSummary {
 
 export type PluginOperationPhase =
   | 'idle'
+  | 'backing-up'
   | 'stopping-dsh'
   | 'installing'
+  | 'updating'
   | 'awaiting-build-approval'
   | 'removing'
   | 'validating'
+  | 'rolling-back'
   | 'restarting-dsh'
   | 'succeeded'
   | 'failed'
 
 export interface PluginOperationState {
   phase: PluginOperationPhase
-  action?: 'install' | 'remove'
+  action?: 'install' | 'remove' | 'update'
   pluginName?: string
   detail?: string
   error?: string
@@ -101,6 +102,7 @@ export interface DesktopMainApi {
   getInstalled(): Promise<InstalledPlugin[]>
   getUpdateSummary(): Promise<PluginUpdateSummary>
   checkUpdates(refresh?: boolean): Promise<PluginUpdateInfo[]>
+  update(packageName: string): Promise<PluginOperationResult>
   install(catalogId: string): Promise<PluginOperationResult>
   remove(packageName: string): Promise<PluginOperationResult>
   subscribeOperation(listener: (state: PluginOperationState) => void): () => void
@@ -121,6 +123,7 @@ export const pluginChannels = {
   installed: 'plugins:installed',
   updateSummary: 'plugins:update-summary',
   updates: 'plugins:updates',
+  update: 'plugins:update',
   install: 'plugins:install',
   remove: 'plugins:remove',
   operationState: 'plugins:operation-state',

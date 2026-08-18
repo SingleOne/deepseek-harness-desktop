@@ -50,11 +50,14 @@ const initialOperation: PluginOperationState = {
 }
 
 const activeOperationPhases = new Set<PluginOperationState['phase']>([
+  'backing-up',
   'stopping-dsh',
   'installing',
+  'updating',
   'awaiting-build-approval',
   'removing',
   'validating',
+  'rolling-back',
   'restarting-dsh'
 ])
 
@@ -75,8 +78,12 @@ function installedSource(plugin: InstalledPlugin): 'npm' | 'github' | 'other' {
   if (/^github:/i.test(source) || /^(?:git\+)?https:\/\/github\.com\//i.test(source)) {
     return 'github'
   }
-  if (/^(?:file|link|workspace|git|https?|npm):/i.test(source)) return 'other'
-  return 'npm'
+  if (/^[a-z][a-z0-9+.-]*:/i.test(source)) return 'other'
+  return semverLikeNpmSource(source) ? 'npm' : 'other'
+}
+
+function semverLikeNpmSource(source: string): boolean {
+  return source === '*' || source === 'latest' || /^[~^<>=v\d]/i.test(source)
 }
 
 function installedSourceLabel(source: 'npm' | 'github' | 'other'): string {
@@ -99,13 +106,12 @@ function PluginDescription({ description }: { description: string }) {
 
 function updateStatusText(update: PluginUpdateInfo | undefined, loading: boolean): string {
   if (!update) return loading ? '正在检查更新…' : '尚未检查更新'
+  const stalePrefix = update.stale ? '上次检查：' : ''
   if (update.status === 'available') {
-    return update.source === 'npm'
-      ? `可更新至 v${update.latestVersion}`
-      : `发现新提交 ${update.latestRevision?.slice(0, 7)}`
+    return `${stalePrefix}v${update.installedVersion ?? '?'} → v${update.latestVersion}`
   }
-  if (update.status === 'up-to-date') return '已是最新'
-  if (update.status === 'pinned') return update.source === 'github' ? '已固定提交' : '已固定版本'
+  if (update.status === 'up-to-date') return `${stalePrefix}已是最新发布版本`
+  if (update.status === 'pinned') return update.source === 'github' ? '已固定 GitHub 来源' : '已固定版本'
   if (update.status === 'unsupported') return '本地或不支持的来源'
   return '暂时无法检查更新'
 }
@@ -205,7 +211,7 @@ export function MainApp() {
   useEffect(() => {
     if (operation.phase === 'succeeded') {
       void loadInstalled()
-      setUpdates(null)
+      void loadUpdates(true)
     }
   }, [operation.phase])
 
@@ -292,7 +298,7 @@ export function MainApp() {
       const result = await api.install(catalogId)
       if (result.status === 'completed') {
         await loadInstalled()
-        setUpdates(null)
+        await loadUpdates(true)
       }
     } catch (error) {
       setActionError(messageOf(error))
@@ -306,7 +312,21 @@ export function MainApp() {
       const result = await api.remove(packageName)
       if (result.status === 'completed') {
         await loadInstalled()
-        setUpdates(null)
+        await loadUpdates(true)
+      }
+    } catch (error) {
+      setActionError(messageOf(error))
+    }
+  }
+
+  const updatePlugin = async (packageName: string): Promise<void> => {
+    if (!api || busy) return
+    setActionError(undefined)
+    try {
+      const result = await api.update(packageName)
+      if (result.status === 'completed') {
+        await loadInstalled()
+        await loadUpdates(true)
       }
     } catch (error) {
       setActionError(messageOf(error))
@@ -501,6 +521,10 @@ export function MainApp() {
                     (plugin.npmPackage
                       ? installedByPackageName.get(plugin.npmPackage)
                       : undefined)
+                  const installedUpdate = installedPlugin
+                    ? updatesByPackage.get(installedPlugin.packageName)
+                    : undefined
+                  const canUpdate = installedUpdate?.status === 'available' && !installedUpdate.stale
                   return (
                     <article className="plugin-card" key={plugin.id}>
                       <div className="plugin-card-topline">
@@ -527,23 +551,27 @@ export function MainApp() {
                         </button>
                         <button
                           className={
-                            installedPlugin
-                              ? 'market-button market-button--danger'
+                            canUpdate
+                              ? 'market-button market-button--primary'
+                              : installedPlugin
+                                ? 'market-button market-button--installed'
                               : 'market-button market-button--primary'
                           }
-                          disabled={busy}
+                          disabled={busy || Boolean(installedPlugin && !canUpdate)}
                           onClick={() =>
                             void (installedPlugin
-                              ? removePlugin(installedPlugin.packageName)
+                              ? updatePlugin(installedPlugin.packageName)
                               : installPlugin(plugin.id))
                           }
                         >
-                          {installedPlugin ? (
-                            <Trash2 aria-hidden="true" />
+                          {canUpdate ? (
+                            <RefreshCw aria-hidden="true" />
+                          ) : installedPlugin ? (
+                            <PackageCheck aria-hidden="true" />
                           ) : (
                             <Download aria-hidden="true" />
                           )}
-                          {installedPlugin ? '卸载' : '安装'}
+                          {canUpdate ? '更新' : installedPlugin ? '已安装' : '安装'}
                         </button>
                       </div>
                     </article>
@@ -623,14 +651,27 @@ export function MainApp() {
                           {updateStatusText(update, updatesLoading)}
                         </span>
                       </div>
-                      <button
-                        className="market-button market-button--danger"
-                        disabled={busy}
-                        onClick={() => void removePlugin(plugin.packageName)}
-                      >
-                        <Trash2 aria-hidden="true" />
-                        卸载
-                      </button>
+                      <div className="installed-actions">
+                        {update?.status === 'available' && (
+                          <button
+                            className="market-button market-button--primary"
+                            disabled={busy || Boolean(update.stale)}
+                            title={update.stale ? '远端检查失败，请刷新后再更新' : undefined}
+                            onClick={() => void updatePlugin(plugin.packageName)}
+                          >
+                            <RefreshCw aria-hidden="true" />
+                            更新
+                          </button>
+                        )}
+                        <button
+                          className="market-button market-button--danger"
+                          disabled={busy}
+                          onClick={() => void removePlugin(plugin.packageName)}
+                        >
+                          <Trash2 aria-hidden="true" />
+                          卸载
+                        </button>
+                      </div>
                     </article>
                   )
                 })}

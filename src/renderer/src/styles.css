@@ -1148,6 +1148,12 @@ button {
   flex: 1;
 }
 
+.installed-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
 .installed-title-row {
   display: flex;
   gap: 9px;

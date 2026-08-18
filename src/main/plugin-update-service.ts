@@ -1,24 +1,43 @@
-import { execFile } from 'node:child_process'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { promisify } from 'node:util'
 import semver from 'semver'
 import type {
   InstalledPlugin,
   PluginUpdateInfo,
   PluginUpdateSummary
 } from '../shared/plugin-market'
-import { commandEnvironment } from './command-environment'
+import { PluginCatalogService } from './plugin-catalog-service'
 import { PluginProfileService } from './plugin-profile-service'
 
-const execFileAsync = promisify(execFile)
 const cacheDurationMs = 30 * 60_000
-const githubRevision = /^[0-9a-f]{40}$/i
+const githubRevision = /^[0-9a-f]{7,40}$/i
+const updateStatuses = new Set<PluginUpdateInfo['status']>([
+  'available',
+  'up-to-date',
+  'pinned',
+  'unsupported',
+  'unavailable'
+])
+const updateSources = new Set<PluginUpdateInfo['source']>(['npm', 'github', 'other'])
 
 interface GithubSource {
+  owner: string
+  repository: string
   repositoryUrl: string
   ref?: string
+  packagePath?: string
   pinned: boolean
+}
+
+interface RemotePackageManifest {
+  name?: unknown
+  version?: unknown
+  repository?: unknown
+  dsh?: {
+    bundle?: {
+      patch?: unknown
+    }
+  }
 }
 
 interface UpdateCache {
@@ -28,8 +47,31 @@ interface UpdateCache {
 }
 
 interface PersistedUpdateState {
-  availablePackages: string[]
+  fingerprint?: string
+  updates?: PluginUpdateInfo[]
+  availablePackages?: string[]
   checkedAt?: string
+}
+
+interface CheckResult {
+  update: PluginUpdateInfo
+  transientFailure: boolean
+}
+
+export interface PluginUpdateTarget {
+  readonly packageName: string
+  readonly source: 'npm' | 'github'
+  readonly sourceSpec: string
+  readonly installSpec: string
+  readonly installedVersion: string
+  readonly targetVersion: string
+  readonly repositoryUrl?: string
+}
+
+class RemoteCheckError extends Error {
+  constructor(message: string, readonly transient: boolean) {
+    super(message)
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -41,11 +83,16 @@ function installedFingerprint(plugins: InstalledPlugin[]): string {
     .map((plugin) => [
       plugin.packageName,
       plugin.version ?? '',
-      plugin.installedRevision ?? '',
-      plugin.sourceSpec
+      plugin.sourceSpec,
+      plugin.repositoryUrl ?? ''
     ].join('\u0000'))
     .sort()
     .join('\u0001')
+}
+
+function semanticTagVersion(ref: string): string | null {
+  const candidate = ref.replace(/^refs\/tags\//i, '').replace(/^v(?=\d)/i, '')
+  return semver.valid(candidate)
 }
 
 function parseGithubSource(sourceSpec: string): GithubSource | null {
@@ -63,60 +110,106 @@ function parseGithubSource(sourceSpec: string): GithubSource | null {
   const repositoryMatch = repositoryPart.match(/^([^/\s]+)\/([^/\s]+)$/)
   if (!repositoryMatch) return null
 
-  const fragment = hashIndex >= 0 ? source.slice(hashIndex + 1) : ''
-  const ref = fragment
+  const fragmentParts = (hashIndex >= 0 ? source.slice(hashIndex + 1) : '')
     .split('&')
     .map((part) => part.trim())
-    .find((part) => part && !part.startsWith('path:/'))
+    .filter(Boolean)
+  const pathPart = fragmentParts.find((part) => part.startsWith('path:/'))
+  const packagePath = pathPart?.slice('path:/'.length)
+  if (packagePath) {
+    const parts = packagePath.split('/')
+    if (parts.some((part) => !part || part === '.' || part === '..')) return null
+  }
+  const ref = fragmentParts.find((part) => !part.startsWith('path:/'))
 
   return {
+    owner: repositoryMatch[1],
+    repository: repositoryMatch[2],
     repositoryUrl: `https://github.com/${repositoryMatch[1]}/${repositoryMatch[2]}`,
     ref,
-    pinned: ref ? githubRevision.test(ref) : false
+    packagePath,
+    pinned: Boolean(ref && (githubRevision.test(ref) || semanticTagVersion(ref)))
   }
 }
 
-async function latestNpmVersion(packageName: string): Promise<string> {
-  const response = await fetch(
-    `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
-    {
-      headers: { Accept: 'application/json' },
+function githubRepository(value: unknown): string | undefined {
+  const raw = typeof value === 'string'
+    ? value
+    : value && typeof value === 'object' && 'url' in value && typeof value.url === 'string'
+      ? value.url
+      : undefined
+  if (!raw) return undefined
+  const shorthand = raw.match(/^github:([^/\s]+)\/([^#\s]+)$/i)
+  if (shorthand) return `${shorthand[1]}/${shorthand[2].replace(/\.git$/i, '')}`.toLowerCase()
+  const scp = raw.match(/^git@github\.com:([^/\s]+)\/([^\s]+)$/i)
+  if (scp) return `${scp[1]}/${scp[2].replace(/\.git$/i, '')}`.toLowerCase()
+  const normalized = raw
+    .replace(/^git\+/, '')
+    .replace(/^git:\/\//, 'https://')
+    .replace(/^ssh:\/\/git@github\.com\//i, 'https://github.com/')
+  try {
+    const url = new URL(normalized)
+    if (url.hostname.toLowerCase() !== 'github.com') return undefined
+    const parts = url.pathname.split('/').filter(Boolean)
+    if (parts.length < 2) return undefined
+    return `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`.toLowerCase()
+  } catch {
+    return undefined
+  }
+}
+
+function exactNpmVersion(sourceSpec: string): string | null {
+  const candidate = sourceSpec.trim().replace(/^=/, '').replace(/^v(?=\d)/i, '')
+  return semver.valid(candidate)
+}
+
+function isTrackedNpmSpec(sourceSpec: string): boolean {
+  const source = sourceSpec.trim()
+  if (source === '*' || source === 'latest') return true
+  return !exactNpmVersion(source) && semver.validRange(source) !== null
+}
+
+function rawGithubManifestUrl(source: GithubSource): string {
+  const ref = encodeURIComponent(source.ref ?? 'HEAD')
+  const packageSegments = [...(source.packagePath?.split('/') ?? []), 'package.json']
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+  return `https://raw.githubusercontent.com/${encodeURIComponent(source.owner)}/${encodeURIComponent(source.repository)}/${ref}/${packageSegments}`
+}
+
+async function fetchJson(url: string, label: string): Promise<unknown> {
+  let response: Response
+  try {
+    response = await fetch(url, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'deepseek-harness-desktop'
+      },
       signal: AbortSignal.timeout(12_000)
-    }
-  )
-  if (!response.ok) throw new Error(`npm registry 返回 HTTP ${response.status}`)
-  const value = await response.json() as { version?: unknown }
-  if (typeof value.version !== 'string' || !semver.valid(value.version)) {
-    throw new Error('npm registry 没有返回有效版本')
+    })
+  } catch (error) {
+    throw new RemoteCheckError(`${label} 请求失败：${errorMessage(error)}`, true)
   }
-  return value.version
+  if (!response.ok) {
+    const transient = response.status === 408 || response.status === 429 || response.status >= 500
+    throw new RemoteCheckError(`${label} 返回 HTTP ${response.status}`, transient)
+  }
+  try {
+    return await response.json()
+  } catch {
+    throw new RemoteCheckError(`${label} 没有返回有效 JSON`, false)
+  }
 }
 
-async function remoteGithubRevision(source: GithubSource): Promise<{ revision?: string; pinned: boolean }> {
-  if (source.pinned) return { revision: source.ref?.toLowerCase(), pinned: true }
+async function latestNpmManifest(packageName: string): Promise<RemotePackageManifest> {
+  return await fetchJson(
+    `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
+    'npm registry'
+  ) as RemotePackageManifest
+}
 
-  const query = async (ref: string): Promise<string | undefined> => {
-    const { stdout } = await execFileAsync(
-      'git',
-      ['ls-remote', source.repositoryUrl, ref],
-      {
-        encoding: 'utf8',
-        env: commandEnvironment(),
-        timeout: 12_000,
-        windowsHide: true,
-        maxBuffer: 256 * 1024
-      }
-    )
-    const output = typeof stdout === 'string' ? stdout : stdout.toString('utf8')
-    return output.match(/[0-9a-f]{40}/i)?.[0]?.toLowerCase()
-  }
-
-  if (!source.ref) return { revision: await query('HEAD'), pinned: false }
-
-  const branchRevision = await query(`refs/heads/${source.ref}`)
-  if (branchRevision) return { revision: branchRevision, pinned: false }
-  const tagRevision = await query(`refs/tags/${source.ref}`)
-  return { revision: tagRevision, pinned: Boolean(tagRevision) }
+async function remoteGithubManifest(source: GithubSource): Promise<RemotePackageManifest> {
+  return await fetchJson(rawGithubManifestUrl(source), 'GitHub package.json') as RemotePackageManifest
 }
 
 async function mapWithConcurrency<T, R>(
@@ -136,6 +229,20 @@ async function mapWithConcurrency<T, R>(
   return results
 }
 
+function persistedUpdate(value: unknown): PluginUpdateInfo | null {
+  if (!value || typeof value !== 'object') return null
+  const update = value as Partial<PluginUpdateInfo>
+  if (
+    typeof update.packageName !== 'string'
+    || typeof update.source !== 'string'
+    || !updateSources.has(update.source as PluginUpdateInfo['source'])
+    || typeof update.status !== 'string'
+    || !updateStatuses.has(update.status as PluginUpdateInfo['status'])
+    || typeof update.checkedAt !== 'string'
+  ) return null
+  return update as PluginUpdateInfo
+}
+
 export class PluginUpdateService {
   private cache: UpdateCache | null = null
   private activeCheck: Promise<PluginUpdateInfo[]> | null = null
@@ -143,15 +250,20 @@ export class PluginUpdateService {
 
   constructor(
     private readonly profile: PluginProfileService,
+    private readonly catalog: PluginCatalogService,
     private readonly stateFilePath: string
   ) {}
 
+  invalidate(): void {
+    this.cache = null
+  }
+
   async getSummary(): Promise<PluginUpdateSummary> {
     const state = await this.loadPersistedState()
-    return {
-      availableCount: state.availablePackages.length,
-      checkedAt: state.checkedAt
-    }
+    const availableCount = state.updates
+      ? state.updates.filter((update) => update.status === 'available').length
+      : state.availablePackages?.length ?? 0
+    return { availableCount, checkedAt: state.checkedAt }
   }
 
   async checkInstalled(refresh = false): Promise<PluginUpdateInfo[]> {
@@ -165,24 +277,72 @@ export class PluginUpdateService {
     }
   }
 
+  async resolveUpdate(packageName: string): Promise<PluginUpdateTarget> {
+    const installed = await this.profile.listInstalled()
+    const plugin = installed.find((item) => item.packageName === packageName)
+    if (!plugin) throw new Error('该插件不在当前 web profile 中')
+    await this.catalog.getCatalog().catch(() => undefined)
+    const result = await this.checkPlugin(plugin)
+    const update = result.update
+    if (
+      update.status !== 'available'
+      || !update.installedVersion
+      || !update.latestVersion
+      || (update.source !== 'npm' && update.source !== 'github')
+    ) {
+      throw new Error(update.error ?? '该插件当前没有可安装的稳定版本更新')
+    }
+    const github = update.source === 'github' ? parseGithubSource(plugin.sourceSpec) : null
+    return {
+      packageName,
+      source: update.source,
+      sourceSpec: plugin.sourceSpec,
+      installSpec: update.source === 'npm'
+        ? `${packageName}@latest`
+        : plugin.sourceSpec,
+      installedVersion: update.installedVersion,
+      targetVersion: update.latestVersion,
+      repositoryUrl: github?.repositoryUrl ?? plugin.repositoryUrl
+    }
+  }
+
   private async runCheck(refresh: boolean): Promise<PluginUpdateInfo[]> {
     const installed = await this.profile.listInstalled()
     const fingerprint = installedFingerprint(installed)
     if (
-      !refresh &&
-      this.cache?.fingerprint === fingerprint &&
-      this.cache.expiresAt > Date.now()
-    ) {
-      return this.cache.updates
-    }
+      !refresh
+      && this.cache?.fingerprint === fingerprint
+      && this.cache.expiresAt > Date.now()
+    ) return this.cache.updates
 
-    const updates = await mapWithConcurrency(installed, 4, (plugin) => this.checkPlugin(plugin))
+    await this.catalog.getCatalog().catch(() => undefined)
+    const persisted = await this.loadPersistedState()
+    const previousUpdates = this.cache?.fingerprint === fingerprint
+      ? this.cache.updates
+      : persisted.fingerprint === fingerprint
+        ? persisted.updates
+        : undefined
+    const previousByPackage = new Map(
+      (previousUpdates ?? []).map((update) => [update.packageName, update] as const)
+    )
+    const results = await mapWithConcurrency(installed, 4, (plugin) => this.checkPlugin(plugin))
+    const updates = results.map(({ update, transientFailure }) => {
+      const previous = previousByPackage.get(update.packageName)
+      if (!transientFailure || !previous) return update
+      return {
+        ...previous,
+        checkedAt: update.checkedAt,
+        stale: true,
+        error: update.error
+      }
+    })
+
     this.cache = {
       fingerprint,
       expiresAt: Date.now() + cacheDurationMs,
       updates
     }
-    await this.persistAvailableUpdates(installed, updates)
+    await this.persistUpdates(fingerprint, updates).catch(() => undefined)
     return updates
   }
 
@@ -191,135 +351,172 @@ export class PluginUpdateService {
     try {
       const value = JSON.parse(await readFile(this.stateFilePath, 'utf8')) as PersistedUpdateState
       this.persistedState = {
+        fingerprint: typeof value.fingerprint === 'string' ? value.fingerprint : undefined,
+        updates: Array.isArray(value.updates)
+          ? value.updates.map(persistedUpdate).filter((item): item is PluginUpdateInfo => item !== null)
+          : undefined,
         availablePackages: Array.isArray(value.availablePackages)
           ? value.availablePackages.filter((item): item is string => typeof item === 'string')
-          : [],
+          : undefined,
         checkedAt: typeof value.checkedAt === 'string' ? value.checkedAt : undefined
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      this.persistedState = { availablePackages: [] }
+    } catch {
+      this.persistedState = {}
     }
     return this.persistedState
   }
 
-  private async persistAvailableUpdates(
-    installed: InstalledPlugin[],
-    updates: PluginUpdateInfo[]
-  ): Promise<void> {
-    const previous = await this.loadPersistedState()
-    const installedPackages = new Set(installed.map((plugin) => plugin.packageName))
-    const availablePackages = new Set(
-      previous.availablePackages.filter((packageName) => installedPackages.has(packageName))
-    )
-
-    for (const update of updates) {
-      if (update.status === 'available') availablePackages.add(update.packageName)
-      else if (update.status !== 'unavailable') availablePackages.delete(update.packageName)
-    }
-
+  private async persistUpdates(fingerprint: string, updates: PluginUpdateInfo[]): Promise<void> {
     this.persistedState = {
-      availablePackages: [...availablePackages].sort(),
+      fingerprint,
+      updates,
       checkedAt: new Date().toISOString()
     }
     await mkdir(path.dirname(this.stateFilePath), { recursive: true })
     await writeFile(this.stateFilePath, JSON.stringify(this.persistedState, null, 2), 'utf8')
   }
 
-  private async checkPlugin(plugin: InstalledPlugin): Promise<PluginUpdateInfo> {
+  private unavailable(
+    plugin: InstalledPlugin,
+    source: PluginUpdateInfo['source'],
+    checkedAt: string,
+    error: string,
+    transientFailure = false
+  ): CheckResult {
+    return {
+      update: {
+        packageName: plugin.packageName,
+        source,
+        status: 'unavailable',
+        installedVersion: plugin.version,
+        checkedAt,
+        error
+      },
+      transientFailure
+    }
+  }
+
+  private async checkPlugin(plugin: InstalledPlugin): Promise<CheckResult> {
     const checkedAt = new Date().toISOString()
     const github = parseGithubSource(plugin.sourceSpec)
-    if (github) {
-      if (!plugin.installedRevision) {
-        return {
-          packageName: plugin.packageName,
-          source: 'github',
-          status: 'unavailable',
-          installedVersion: plugin.version,
-          checkedAt,
-          error: '锁文件中没有找到当前 Git 提交'
-        }
-      }
-      try {
-        const remote = await remoteGithubRevision(github)
-        if (!remote.revision) throw new Error('远端没有返回可比较的提交')
-        return {
-          packageName: plugin.packageName,
-          source: 'github',
-          status: remote.pinned
-            ? 'pinned'
-            : remote.revision === plugin.installedRevision
-              ? 'up-to-date'
-              : 'available',
-          installedVersion: plugin.version,
-          installedRevision: plugin.installedRevision,
-          latestRevision: remote.revision,
-          checkedAt
-        }
-      } catch (error) {
-        return {
-          packageName: plugin.packageName,
-          source: 'github',
-          status: 'unavailable',
-          installedVersion: plugin.version,
-          installedRevision: plugin.installedRevision,
-          checkedAt,
-          error: errorMessage(error)
-        }
-      }
-    }
+    if (github) return this.checkGithubPlugin(plugin, github, checkedAt)
 
-    if (
-      /^(?:file|link|workspace|npm):/i.test(plugin.sourceSpec) ||
-      /^(?:git|https?):/i.test(plugin.sourceSpec)
-    ) {
+    if (exactNpmVersion(plugin.sourceSpec)) {
       return {
-        packageName: plugin.packageName,
-        source: 'other',
-        status: 'unsupported',
-        installedVersion: plugin.version,
-        checkedAt
+        update: {
+          packageName: plugin.packageName,
+          source: 'npm',
+          status: 'pinned',
+          installedVersion: plugin.version,
+          checkedAt
+        },
+        transientFailure: false
       }
     }
-    if (semver.valid(plugin.sourceSpec)) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(plugin.sourceSpec) || !isTrackedNpmSpec(plugin.sourceSpec)) {
       return {
-        packageName: plugin.packageName,
-        source: 'npm',
-        status: 'pinned',
-        installedVersion: plugin.version,
-        checkedAt
+        update: {
+          packageName: plugin.packageName,
+          source: 'other',
+          status: 'unsupported',
+          installedVersion: plugin.version,
+          checkedAt
+        },
+        transientFailure: false
       }
     }
     if (!plugin.version || !semver.valid(plugin.version)) {
-      return {
-        packageName: plugin.packageName,
-        source: 'npm',
-        status: 'unavailable',
-        installedVersion: plugin.version,
-        checkedAt,
-        error: '无法读取当前安装版本'
-      }
+      return this.unavailable(plugin, 'npm', checkedAt, '无法读取当前安装版本')
     }
 
     try {
-      const latestVersion = await latestNpmVersion(plugin.packageName)
+      const manifest = await latestNpmManifest(plugin.packageName)
+      if (manifest.name !== plugin.packageName) {
+        return this.unavailable(plugin, 'npm', checkedAt, 'npm registry 返回的包名不匹配')
+      }
+      const latestVersion = typeof manifest.version === 'string' ? semver.valid(manifest.version) : null
+      if (!latestVersion) return this.unavailable(plugin, 'npm', checkedAt, 'npm registry 没有返回有效版本')
+
+      const catalogPlugin = this.catalog.findCatalogPlugin(plugin)
+      const expectedRepository = githubRepository(catalogPlugin?.repositoryUrl ?? plugin.repositoryUrl)
+      const latestRepository = githubRepository(manifest.repository)
+      if (expectedRepository && latestRepository !== expectedRepository) {
+        return this.unavailable(plugin, 'npm', checkedAt, 'npm 最新版本的代码仓库与已安装来源不一致')
+      }
       return {
-        packageName: plugin.packageName,
-        source: 'npm',
-        status: semver.gt(latestVersion, plugin.version) ? 'available' : 'up-to-date',
-        installedVersion: plugin.version,
-        latestVersion,
-        checkedAt
+        update: {
+          packageName: plugin.packageName,
+          source: 'npm',
+          status: semver.gt(latestVersion, plugin.version) ? 'available' : 'up-to-date',
+          installedVersion: plugin.version,
+          latestVersion,
+          checkedAt
+        },
+        transientFailure: false
       }
     } catch (error) {
-      return {
-        packageName: plugin.packageName,
-        source: 'npm',
-        status: 'unavailable',
-        installedVersion: plugin.version,
+      return this.unavailable(
+        plugin,
+        'npm',
         checkedAt,
-        error: errorMessage(error)
+        errorMessage(error),
+        error instanceof RemoteCheckError && error.transient
+      )
+    }
+  }
+
+  private async checkGithubPlugin(
+    plugin: InstalledPlugin,
+    source: GithubSource,
+    checkedAt: string
+  ): Promise<CheckResult> {
+    if (source.pinned) {
+      return {
+        update: {
+          packageName: plugin.packageName,
+          source: 'github',
+          status: 'pinned',
+          installedVersion: plugin.version,
+          checkedAt
+        },
+        transientFailure: false
       }
+    }
+    if (!plugin.version || !semver.valid(plugin.version)) {
+      return this.unavailable(plugin, 'github', checkedAt, '无法读取当前安装版本')
+    }
+
+    try {
+      const manifest = await remoteGithubManifest(source)
+      if (manifest.name !== plugin.packageName) {
+        return this.unavailable(plugin, 'github', checkedAt, 'GitHub 目标目录的包名与已安装插件不匹配')
+      }
+      const latestVersion = typeof manifest.version === 'string' ? semver.valid(manifest.version) : null
+      if (!latestVersion) {
+        return this.unavailable(plugin, 'github', checkedAt, 'GitHub 目标目录没有声明有效发布版本')
+      }
+      if (typeof manifest.dsh?.bundle?.patch !== 'string') {
+        return this.unavailable(plugin, 'github', checkedAt, 'GitHub 目标版本没有声明有效 DSH bundle')
+      }
+      return {
+        update: {
+          packageName: plugin.packageName,
+          source: 'github',
+          status: semver.gt(latestVersion, plugin.version) ? 'available' : 'up-to-date',
+          installedVersion: plugin.version,
+          latestVersion,
+          checkedAt
+        },
+        transientFailure: false
+      }
+    } catch (error) {
+      return this.unavailable(
+        plugin,
+        'github',
+        checkedAt,
+        errorMessage(error),
+        error instanceof RemoteCheckError && error.transient
+      )
     }
   }
 }

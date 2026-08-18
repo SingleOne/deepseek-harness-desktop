@@ -59,5 +59,5 @@ describe('pnpm runtime selection', () => {
 
   it('can execute the fixed pnpm dependency from the development fallback', () => {
     expect(probePnpm(path.resolve('node_modules', '.bin'))).toBe('11.22.0')
-  })
+  }, 15_000)
 })

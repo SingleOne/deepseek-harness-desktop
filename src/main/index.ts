@@ -168,6 +168,7 @@ if (!hasSingleInstanceLock) {
     const profileService = new PluginProfileService()
     const updateService = new PluginUpdateService(
       profileService,
+      catalogService,
       path.join(app.getPath('appData'), 'dsh-desktop', 'plugin-update-state.json')
     )
     const pnpmRuntime = selectPnpmRuntime(
@@ -267,6 +268,34 @@ if (!hasSingleInstanceLock) {
       requireMainSender(event.sender)
       return updateService.checkInstalled(refresh === true)
     })
+    ipcMain.handle(pluginChannels.update, async (event, packageName: unknown) => {
+      requireMainSender(event.sender)
+      if (typeof packageName !== 'string') throw new Error('无效的插件包名')
+      const target = await updateService.resolveUpdate(packageName)
+      const window = controller?.mainBrowserWindow
+      if (!window) throw new Error('桌面主窗口尚未就绪')
+      const result = await dialog.showMessageBox(window, {
+        type: 'warning',
+        title: '更新第三方插件',
+        message: `确认更新 ${target.packageName}？`,
+        detail:
+          `来源：${target.source === 'github' ? target.repositoryUrl : target.packageName}\n` +
+          `版本：v${target.installedVersion} → v${target.targetVersion}\n\n` +
+          '更新过程中会备份 web profile、停止并重新启动 DSH。第三方插件代码能够访问本机文件、网络和环境变量。',
+        buttons: ['更新并重启 DSH', '取消'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true
+      })
+      if (result.response !== 0) return { status: 'cancelled' } as const
+      if (!pluginService) throw new Error('插件服务尚未就绪')
+      const completed = await pluginService.update(target)
+      updateService.invalidate()
+      void updateService.checkInstalled(true).catch((error) => {
+        console.warn('插件更新后刷新更新状态失败', error)
+      })
+      return { status: completed ? 'completed' : 'cancelled' } as const
+    })
     ipcMain.handle(pluginChannels.install, async (event, catalogId: unknown) => {
       requireMainSender(event.sender)
       if (typeof catalogId !== 'string') throw new Error('无效的插件目录 ID')
@@ -288,6 +317,10 @@ if (!hasSingleInstanceLock) {
       if (result.response !== 0) return { status: 'cancelled' } as const
       if (!pluginService) throw new Error('插件服务尚未就绪')
       const completed = await pluginService.install(catalogId)
+      updateService.invalidate()
+      void updateService.checkInstalled(true).catch((error) => {
+        console.warn('插件安装后刷新更新状态失败', error)
+      })
       return { status: completed ? 'completed' : 'cancelled' } as const
     })
     ipcMain.handle(pluginChannels.remove, async (event, packageName: unknown) => {
@@ -310,6 +343,10 @@ if (!hasSingleInstanceLock) {
       })
       if (result.response !== 0) return { status: 'cancelled' } as const
       await pluginService?.remove(packageName)
+      updateService.invalidate()
+      void updateService.checkInstalled(true).catch((error) => {
+        console.warn('插件卸载后刷新更新状态失败', error)
+      })
       return { status: 'completed' } as const
     })
     ipcMain.handle(pluginChannels.openCatalogPlugin, async (event, catalogId: unknown) => {

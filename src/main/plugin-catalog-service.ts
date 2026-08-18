@@ -245,18 +245,22 @@ export class PluginCatalogService {
     return plugin
   }
 
-  findCatalogId(installed: InstalledPlugin): string | undefined {
+  findCatalogPlugin(installed: InstalledPlugin): ResolvedCatalogItem | undefined {
     if (!this.cache) return undefined
     const repository = installed.repositoryUrl?.replace(/\.git$/i, '').toLowerCase()
     for (const plugin of this.cache.resolved.values()) {
-      if (plugin.npmPackage === installed.packageName) return plugin.id
-      if (installed.sourceSpec === plugin.installSpec) return plugin.id
+      if (plugin.npmPackage === installed.packageName) return plugin
+      if (installed.sourceSpec === plugin.installSpec) return plugin
       const pluginRepository = plugin.repositoryUrl
         .replace(/\/tree\/.*$/i, '')
         .replace(/\.git$/i, '')
         .toLowerCase()
-      if (repository && repository === pluginRepository) return plugin.id
+      if (repository && repository === pluginRepository) return plugin
     }
     return undefined
+  }
+
+  findCatalogId(installed: InstalledPlugin): string | undefined {
+    return this.findCatalogPlugin(installed)?.id
   }
 }

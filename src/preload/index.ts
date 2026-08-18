@@ -59,6 +59,9 @@ const mainApi: DesktopMainApi = {
   checkUpdates(refresh = false) {
     return ipcRenderer.invoke(pluginChannels.updates, refresh)
   },
+  update(packageName) {
+    return ipcRenderer.invoke(pluginChannels.update, packageName)
+  },
   install(catalogId) {
     return ipcRenderer.invoke(pluginChannels.install, catalogId)
   },

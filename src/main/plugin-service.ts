@@ -6,7 +6,11 @@ import type {
 } from '../shared/plugin-market'
 import { runDshCommandChecked, type DshCommandOptions } from './dsh-command'
 import { PluginCatalogService, type ResolvedCatalogItem } from './plugin-catalog-service'
-import { PluginProfileService } from './plugin-profile-service'
+import {
+  PluginProfileService,
+  type PluginProfileSnapshot
+} from './plugin-profile-service'
+import type { PluginUpdateTarget } from './plugin-update-service'
 import type { PnpmRuntime } from './pnpm-runtime'
 import {
   parsePnpmGitBuildApproval,
@@ -21,6 +25,13 @@ interface PluginRuntimeHooks {
 }
 
 type OperationListener = (state: PluginOperationState) => void
+
+interface PluginAddTarget {
+  name: string
+  source: 'npm' | 'github'
+  installSpec: string
+  repositoryUrl?: string
+}
 
 class PluginInstallCancelledError extends Error {
   constructor() {
@@ -211,6 +222,122 @@ export class PluginService {
     this.setState({ phase: 'succeeded', detail: `${packageName} 已卸载并完成重启` })
   }
 
+  async update(target: PluginUpdateTarget): Promise<boolean> {
+    if (this.busy) throw new Error('已有插件操作正在进行')
+    this.busy = true
+    let installation: DshInstallation
+    let pnpmOptions: DshCommandOptions
+    try {
+      const installed = await this.listInstalled()
+      const current = installed.find((item) => item.packageName === target.packageName)
+      if (!current) throw new Error('该插件不在当前 web profile 中')
+      if (current.sourceSpec !== target.sourceSpec || current.version !== target.installedVersion) {
+        throw new Error('插件来源或版本已变化，请重新检查更新')
+      }
+      installation = this.requireInstallation()
+      pnpmOptions = this.requirePnpm(installation)
+    } catch (error) {
+      this.busy = false
+      throw error
+    }
+
+    this.setState({
+      phase: 'backing-up',
+      action: 'update',
+      pluginName: target.packageName,
+      detail: `正在备份 ${target.packageName} 的 web profile`,
+      logs: []
+    })
+    this.appendPnpmLog()
+
+    let snapshot: PluginProfileSnapshot
+    try {
+      snapshot = await this.profile.createSnapshot(target.packageName)
+      this.appendLog(`[备份] ${snapshot.backupDirectory}`)
+    } catch (error) {
+      this.busy = false
+      const message = errorMessage(error)
+      this.setState({ phase: 'failed', detail: '插件更新前备份失败', error: message })
+      throw new Error(message)
+    }
+
+    let operationError: unknown
+    let rollbackError: unknown
+    let cancelled = false
+    try {
+      await this.runtime.stop(`正在更新 ${target.packageName}`)
+      this.setState({
+        phase: 'updating',
+        detail: `正在更新 ${target.packageName}：v${target.installedVersion} → v${target.targetVersion}`
+      })
+      await this.addPlugin(installation, {
+        name: target.packageName,
+        source: target.source,
+        installSpec: target.installSpec,
+        repositoryUrl: target.repositoryUrl
+      }, pnpmOptions)
+
+      this.setState({ phase: 'validating', detail: '正在校验更新结果和 DSH 配置' })
+      await this.profile.validatePlugin(target.packageName, target.targetVersion, true)
+      await this.dumpConfig(installation)
+    } catch (error) {
+      cancelled = error instanceof PluginInstallCancelledError
+      operationError = error
+      this.appendLog(cancelled
+        ? '[取消] 未授权执行第三方构建脚本，正在恢复更新前状态'
+        : `[error] ${errorMessage(error)}`)
+    }
+
+    if (operationError) {
+      try {
+        this.setState({ phase: 'rolling-back', detail: '更新未完成，正在自动恢复 web profile' })
+        await this.profile.restoreSnapshot(snapshot)
+        this.appendLog('[恢复] 已恢复 profile 元数据，正在按锁文件重新安装')
+        await runDshCommandChecked(
+          installation,
+          ['plugin', '--profile', 'web', 'install', '--frozen-lockfile'],
+          app.getPath('home'),
+          (line) => this.appendLog(line),
+          pnpmOptions
+        )
+        await this.profile.validatePlugin(target.packageName, target.installedVersion)
+        await this.dumpConfig(installation)
+        this.appendLog('[恢复] web profile 已恢复并通过校验')
+      } catch (error) {
+        rollbackError = error
+        this.appendLog(`[error] 自动恢复失败：${errorMessage(error)}`)
+      }
+    }
+
+    const restartError = await this.restartRuntime(target.packageName)
+    this.busy = false
+    if (cancelled && !rollbackError && !restartError) {
+      this.setState({ phase: 'idle', detail: `${target.packageName} 更新已取消并恢复` })
+      return false
+    }
+    if (operationError || rollbackError || restartError) {
+      const parts = [
+        operationError && `更新失败：${errorMessage(operationError)}`,
+        rollbackError && `自动恢复失败：${errorMessage(rollbackError)}`,
+        restartError && `DSH 重启失败：${errorMessage(restartError)}`
+      ].filter((value): value is string => Boolean(value))
+      if (rollbackError) parts.push(`备份保留在：${snapshot.backupDirectory}`)
+      const message = parts.join('\n')
+      this.setState({
+        phase: 'failed',
+        detail: rollbackError ? '插件更新失败且自动恢复未完成' : '插件更新失败，已恢复原版本',
+        error: message
+      })
+      throw new Error(message)
+    }
+
+    this.setState({
+      phase: 'succeeded',
+      detail: `${target.packageName} 已更新至 v${target.targetVersion} 并完成重启`
+    })
+    return true
+  }
+
   private requireInstallation(): DshInstallation {
     const installation = this.runtime.getInstallation()
     if (!installation) throw new Error('尚未找到可用的 DSH 安装')
@@ -238,7 +365,7 @@ export class PluginService {
 
   private async addPlugin(
     installation: DshInstallation,
-    plugin: ResolvedCatalogItem,
+    plugin: PluginAddTarget,
     pnpmOptions: DshCommandOptions
   ): Promise<void> {
     const prompted = new Set<string>()
@@ -253,7 +380,7 @@ export class PluginService {
         )
         return
       } catch (error) {
-        const approval = plugin.source === 'github'
+        const approval = plugin.source === 'github' && plugin.repositoryUrl
           ? parsePnpmGitBuildApproval(errorMessage(error), plugin.repositoryUrl)
           : null
         if (!approval || prompted.has(approval.key) || prompted.size >= 3) throw error
@@ -267,11 +394,21 @@ export class PluginService {
         await this.profile.allowBuild(approval)
         this.appendLog(`[授权] 已允许 ${approval.packageName} 为当前 Git 提交执行构建脚本`)
         this.setState({
-          phase: 'installing',
-          detail: `已授权构建，正在重试安装 ${plugin.name}`
+          phase: this.state.action === 'update' ? 'updating' : 'installing',
+          detail: `已授权构建，正在重试${this.state.action === 'update' ? '更新' : '安装'} ${plugin.name}`
         })
       }
     }
+  }
+
+  private async dumpConfig(installation: DshInstallation): Promise<void> {
+    await runDshCommandChecked(
+      installation,
+      ['--profile', 'web', '--dump-config'],
+      app.getPath('home'),
+      (line) => this.appendLog(line),
+      { timeoutMs: 90_000 }
+    )
   }
 
   private async restartRuntime(pluginName: string): Promise<unknown> {

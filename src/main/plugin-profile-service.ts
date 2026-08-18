@@ -1,7 +1,7 @@
 import { homedir } from 'node:os'
-import { readFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { parse as parseYaml } from 'yaml'
+import semver from 'semver'
 import type { InstalledPlugin } from '../shared/plugin-market'
 import {
   allowPnpmBuild,
@@ -20,17 +20,30 @@ interface ProfileManifest {
 }
 
 interface PackageManifest {
+  name?: unknown
   version?: unknown
   repository?: unknown
+  dsh?: {
+    bundle?: {
+      patch?: unknown
+    }
+  }
 }
 
-interface PnpmLockfile {
-  importers?: Record<
-    string,
-    {
-      dependencies?: Record<string, unknown>
-    }
-  >
+const snapshotFileNames = [
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'cordis.patch.yml'
+] as const
+
+export interface PluginProfileSnapshot {
+  readonly backupDirectory: string
+  readonly profileDirectory: string
+  readonly files: ReadonlyArray<{
+    name: (typeof snapshotFileNames)[number]
+    existed: boolean
+  }>
 }
 
 function expandHome(value: string): string {
@@ -74,34 +87,14 @@ async function readJson<T>(filePath: string): Promise<T | null> {
   }
 }
 
-async function readLockedRevisions(filePath: string): Promise<Map<string, string>> {
-  let source: string
+async function fileExists(filePath: string): Promise<boolean> {
   try {
-    source = await readFile(filePath, 'utf8')
+    await stat(filePath)
+    return true
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Map()
-    throw new Error(`无法读取 ${filePath}：${error instanceof Error ? error.message : String(error)}`)
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
   }
-
-  let lockfile: PnpmLockfile | null
-  try {
-    lockfile = parseYaml(source) as PnpmLockfile | null
-  } catch {
-    return new Map()
-  }
-  const dependencies = lockfile?.importers?.['.']?.dependencies ?? {}
-  const revisions = new Map<string, string>()
-  for (const [packageName, value] of Object.entries(dependencies)) {
-    const version =
-      typeof value === 'string'
-        ? value
-        : value && typeof value === 'object' && 'version' in value && typeof value.version === 'string'
-          ? value.version
-          : undefined
-    const revision = version?.match(/[0-9a-f]{40}/i)?.[0]
-    if (revision) revisions.set(packageName, revision.toLowerCase())
-  }
-  return revisions
 }
 
 export class PluginProfileService {
@@ -125,6 +118,94 @@ export class PluginProfileService {
     return allowPnpmBuild(this.profileDirectory, approval)
   }
 
+  async createSnapshot(packageName: string): Promise<PluginProfileSnapshot> {
+    if (!packageNamePattern.test(packageName)) throw new Error('无效的插件包名')
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const safePackageName = packageName.replace(/[^a-zA-Z0-9._-]+/g, '_')
+    const backupDirectory = path.join(
+      resolveDshHome(),
+      'deepseek-harness-desktop',
+      'backups',
+      'plugins',
+      'web',
+      `${timestamp}-${safePackageName}`
+    )
+    await mkdir(backupDirectory, { recursive: true })
+
+    const files: PluginProfileSnapshot['files'][number][] = []
+    for (const name of snapshotFileNames) {
+      const sourcePath = path.join(this.profileDirectory, name)
+      const existed = await fileExists(sourcePath)
+      files.push({ name, existed })
+      if (existed) await copyFile(sourcePath, path.join(backupDirectory, name))
+    }
+    return { backupDirectory, profileDirectory: this.profileDirectory, files }
+  }
+
+  async restoreSnapshot(snapshot: PluginProfileSnapshot): Promise<void> {
+    if (path.resolve(snapshot.profileDirectory) !== path.resolve(this.profileDirectory)) {
+      throw new Error('备份不属于当前 web profile')
+    }
+    for (const file of snapshot.files) {
+      if (!snapshotFileNames.includes(file.name)) throw new Error('备份包含未知的 profile 文件')
+      const targetPath = path.join(this.profileDirectory, file.name)
+      if (file.existed) {
+        await copyFile(path.join(snapshot.backupDirectory, file.name), targetPath)
+      } else {
+        await rm(targetPath, { force: true })
+      }
+    }
+  }
+
+  async validatePlugin(
+    packageName: string,
+    expectedVersion?: string,
+    allowNewerVersion = false
+  ): Promise<InstalledPlugin> {
+    if (!packageNamePattern.test(packageName)) throw new Error('无效的插件包名')
+    const profile = await readJson<ProfileManifest>(path.join(this.profileDirectory, 'package.json'))
+    const sourceValue = profile?.dependencies?.[packageName]
+    if (typeof sourceValue !== 'string') throw new Error(`${packageName} 不在 web profile dependencies 中`)
+    const bundles = profile?.dsh?.profile?.bundles
+    if (!Array.isArray(bundles) || !bundles.includes(packageName)) {
+      throw new Error(`${packageName} 不在 web profile bundles 中`)
+    }
+
+    const packageDirectory = path.join(this.profileDirectory, 'node_modules', packageName)
+    const manifest = await readJson<PackageManifest>(path.join(packageDirectory, 'package.json'))
+    if (!manifest) throw new Error(`无法读取 ${packageName} 的 package.json`)
+    if (manifest.name !== packageName) throw new Error(`${packageName} 的包名声明无效`)
+    const version = typeof manifest.version === 'string' && semver.valid(manifest.version)
+      ? manifest.version
+      : undefined
+    if (!version) throw new Error(`${packageName} 没有有效的语义化版本`)
+    if (
+      expectedVersion
+      && (allowNewerVersion ? semver.lt(version, expectedVersion) : version !== expectedVersion)
+    ) {
+      throw new Error(`${packageName} 更新后版本为 ${version}，预期为 ${expectedVersion}`)
+    }
+
+    const patchValue = manifest.dsh?.bundle?.patch
+    if (typeof patchValue !== 'string' || !patchValue.trim()) {
+      throw new Error(`${packageName} 没有声明有效的 dsh.bundle.patch`)
+    }
+    const patchPath = path.resolve(packageDirectory, patchValue)
+    const relativePatch = path.relative(packageDirectory, patchPath)
+    if (!relativePatch || relativePatch.startsWith('..') || path.isAbsolute(relativePatch)) {
+      throw new Error(`${packageName} 的 dsh.bundle.patch 路径越界`)
+    }
+    const patchStat = await stat(patchPath).catch(() => null)
+    if (!patchStat?.isFile()) throw new Error(`${packageName} 声明的 patch 文件不存在`)
+
+    return {
+      packageName,
+      version,
+      sourceSpec: sourceValue,
+      repositoryUrl: repositoryUrl(manifest.repository)
+    }
+  }
+
   async listInstalled(): Promise<InstalledPlugin[]> {
     const profile = await readJson<ProfileManifest>(path.join(this.profileDirectory, 'package.json'))
     if (!profile) return []
@@ -137,10 +218,6 @@ export class PluginProfileService {
         ? bundleValues.filter((value): value is string => typeof value === 'string')
         : []
     )
-    const lockedRevisions = await readLockedRevisions(
-      path.join(this.profileDirectory, 'pnpm-lock.yaml')
-    )
-
     const installed: InstalledPlugin[] = []
     for (const [packageName, sourceValue] of Object.entries(dependencies)) {
       if (!bundles.has(packageName) || !packageNamePattern.test(packageName)) continue
@@ -151,7 +228,6 @@ export class PluginProfileService {
       installed.push({
         packageName,
         version: typeof manifest?.version === 'string' ? manifest.version : undefined,
-        installedRevision: lockedRevisions.get(packageName),
         sourceSpec,
         repositoryUrl: repositoryUrl(manifest?.repository)
       })

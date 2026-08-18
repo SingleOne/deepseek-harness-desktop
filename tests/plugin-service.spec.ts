@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PluginCatalogService, ResolvedCatalogItem } from '../src/main/plugin-catalog-service'
 import type { PluginProfileService } from '../src/main/plugin-profile-service'
+import type { PluginUpdateTarget } from '../src/main/plugin-update-service'
 import type { PnpmRuntime } from '../src/main/pnpm-runtime'
 import type { PnpmGitBuildApproval } from '../src/main/pnpm-build-policy'
 
@@ -41,7 +42,19 @@ function fixture(approved: boolean, pnpmRuntime?: PnpmRuntime) {
       sourceSpec: plugin.installSpec,
       repositoryUrl: plugin.repositoryUrl
     }]),
-    allowBuild: vi.fn().mockResolvedValue(true)
+    allowBuild: vi.fn().mockResolvedValue(true),
+    createSnapshot: vi.fn().mockResolvedValue({
+      backupDirectory: 'C:\\backups\\plugin',
+      profileDirectory: 'C:\\Users\\tester\\.dsh\\profiles\\web',
+      files: []
+    }),
+    restoreSnapshot: vi.fn().mockResolvedValue(undefined),
+    validatePlugin: vi.fn().mockResolvedValue({
+      packageName: '@0xsline/dsh-spotlight',
+      version: '0.0.3',
+      sourceSpec: plugin.installSpec,
+      repositoryUrl: plugin.repositoryUrl
+    })
   } as unknown as PluginProfileService
   const runtime = {
     getInstallation: vi.fn(() => ({ version: '0.1.0-rc.6', entryPath: 'dsh.js' })),
@@ -134,5 +147,90 @@ describe('plugin installation build approval', () => {
     await expect(service.install(plugin.id)).rejects.toThrow('pnpm unavailable for test')
     expect(runtime.stop).not.toHaveBeenCalled()
     expect(runDshCommandChecked).not.toHaveBeenCalled()
+  })
+})
+
+const updateTarget: PluginUpdateTarget = {
+  packageName: '@0xsline/dsh-spotlight',
+  source: 'github',
+  sourceSpec: plugin.installSpec,
+  installSpec: plugin.installSpec,
+  installedVersion: '0.0.2',
+  targetVersion: '0.0.3',
+  repositoryUrl: plugin.repositoryUrl
+}
+
+describe('plugin update transaction', () => {
+  it('backs up, updates through the DSH command, validates, and restarts', async () => {
+    vi.mocked(runDshCommandChecked).mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    const { profile, runtime, service } = fixture(true)
+
+    await expect(service.update(updateTarget)).resolves.toBe(true)
+
+    expect(profile.createSnapshot).toHaveBeenCalledWith(updateTarget.packageName)
+    expect(runDshCommandChecked).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      ['plugin', '--profile', 'web', 'add', plugin.installSpec],
+      expect.any(String),
+      expect.any(Function),
+      {}
+    )
+    expect(profile.validatePlugin).toHaveBeenCalledWith(updateTarget.packageName, '0.0.3', true)
+    expect(profile.restoreSnapshot).not.toHaveBeenCalled()
+    expect(runtime.stop).toHaveBeenCalledOnce()
+    expect(runtime.restart).toHaveBeenCalledOnce()
+    expect(service.currentState.phase).toBe('succeeded')
+  })
+
+  it('restores the snapshot and frozen lockfile when the update command fails', async () => {
+    vi.mocked(runDshCommandChecked)
+      .mockRejectedValueOnce(new Error('update failed'))
+      .mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    const { profile, runtime, service } = fixture(true)
+
+    await expect(service.update(updateTarget)).rejects.toThrow('update failed')
+
+    expect(profile.restoreSnapshot).toHaveBeenCalledOnce()
+    expect(runDshCommandChecked).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      ['plugin', '--profile', 'web', 'install', '--frozen-lockfile'],
+      expect.any(String),
+      expect.any(Function),
+      {}
+    )
+    expect(profile.validatePlugin).toHaveBeenCalledWith(updateTarget.packageName, '0.0.2')
+    expect(runtime.restart).toHaveBeenCalledOnce()
+    expect(service.currentState).toMatchObject({
+      phase: 'failed',
+      detail: '插件更新失败，已恢复原版本'
+    })
+  })
+
+  it('rolls back and returns cancelled when a new GitHub build is not approved', async () => {
+    vi.mocked(runDshCommandChecked)
+      .mockRejectedValueOnce(new Error(denial))
+      .mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    const { profile, runtime, service } = fixture(false)
+
+    await expect(service.update(updateTarget)).resolves.toBe(false)
+
+    expect(runtime.confirmGitBuild).toHaveBeenCalledOnce()
+    expect(profile.allowBuild).not.toHaveBeenCalled()
+    expect(profile.restoreSnapshot).toHaveBeenCalledOnce()
+    expect(service.currentState.phase).toBe('idle')
+  })
+
+  it('keeps the backup path in the error when automatic recovery also fails', async () => {
+    vi.mocked(runDshCommandChecked).mockRejectedValueOnce(new Error('update failed'))
+    const { profile, service } = fixture(true)
+    vi.mocked(profile.restoreSnapshot).mockRejectedValueOnce(new Error('restore failed'))
+
+    await expect(service.update(updateTarget)).rejects.toThrow('C:\\backups\\plugin')
+    expect(service.currentState).toMatchObject({
+      phase: 'failed',
+      detail: '插件更新失败且自动恢复未完成'
+    })
   })
 })
