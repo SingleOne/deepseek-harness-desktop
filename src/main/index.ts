@@ -12,11 +12,13 @@ import { startNotificationBridge, type NotificationBridge } from './notification
 import { PluginCatalogService } from './plugin-catalog-service'
 import { PluginProfileService } from './plugin-profile-service'
 import { PluginService } from './plugin-service'
+import { PluginUpdateService } from './plugin-update-service'
 import { bundledPnpmBinDirectory, selectPnpmRuntime } from './pnpm-runtime'
 import type { PnpmGitBuildApproval } from './pnpm-build-policy'
 import { applicationIcon, createLauncherWindow, createMainWindow } from './windows'
 
 const runtimeDataDirectory = path.join(os.tmpdir(), 'deepseek-harness-desktop', String(process.pid))
+const catalogSourceRepositoryUrl = 'https://github.com/awesome-dsh-plugin/awesome-dsh-plugin'
 app.setPath('userData', runtimeDataDirectory)
 app.setPath('sessionData', path.join(runtimeDataDirectory, 'session'))
 app.setAppUserModelId('com.deepseek-harness.desktop')
@@ -164,6 +166,10 @@ if (!hasSingleInstanceLock) {
 
     const catalogService = new PluginCatalogService()
     const profileService = new PluginProfileService()
+    const updateService = new PluginUpdateService(
+      profileService,
+      path.join(app.getPath('appData'), 'dsh-desktop', 'plugin-update-state.json')
+    )
     const pnpmRuntime = selectPnpmRuntime(
       bundledPnpmBinDirectory({
         isPackaged: app.isPackaged,
@@ -253,6 +259,14 @@ if (!hasSingleInstanceLock) {
       requireMainSender(event.sender)
       return pluginService?.listInstalled() ?? []
     })
+    ipcMain.handle(pluginChannels.updateSummary, async (event) => {
+      requireMainSender(event.sender)
+      return updateService.getSummary()
+    })
+    ipcMain.handle(pluginChannels.updates, async (event, refresh: unknown) => {
+      requireMainSender(event.sender)
+      return updateService.checkInstalled(refresh === true)
+    })
     ipcMain.handle(pluginChannels.install, async (event, catalogId: unknown) => {
       requireMainSender(event.sender)
       if (typeof catalogId !== 'string') throw new Error('无效的插件目录 ID')
@@ -304,7 +318,14 @@ if (!hasSingleInstanceLock) {
       const plugin = await catalogService.getPlugin(catalogId)
       await shell.openExternal(plugin.repositoryUrl)
     })
+    ipcMain.handle(pluginChannels.openCatalogSource, async (event) => {
+      requireMainSender(event.sender)
+      await shell.openExternal(catalogSourceRepositoryUrl)
+    })
 
+    void updateService
+      .checkInstalled(true)
+      .catch((error) => console.warn('启动时检查插件更新失败', error))
     void controller.start()
   })
 }

@@ -1,4 +1,4 @@
-import { Activity, ArrowRight, CircleAlert, Power, RefreshCw, Terminal } from 'lucide-react'
+import { Activity, ArrowRight, CircleAlert, LoaderCircle, Power, RefreshCw, Terminal } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { LauncherState } from '../../shared/launcher'
 
@@ -6,7 +6,7 @@ const initialState: LauncherState = {
   phase: 'idle',
   title: '准备启动',
   detail: '正在连接启动服务',
-  appVersion: '0.1.2',
+  appVersion: '0.3.1',
   logs: []
 }
 
@@ -14,7 +14,7 @@ const browserPreviewState: LauncherState = {
   phase: 'checking-dsh',
   title: '检查 DSH',
   detail: '正在读取已安装版本并检查 npm 最新版本',
-  appVersion: '0.1.2',
+  appVersion: '0.3.1',
   installedDshVersion: '0.1.0-rc.5',
   latestDshVersion: '0.1.0-rc.6',
   logs: [
@@ -85,6 +85,7 @@ export function LauncherApp() {
 
   const isError = state.phase === 'error'
   const isReady = state.phase === 'ready'
+  const isLoading = !isError && !isReady
 
   const logClassName = (line: string): string => {
     if (line.startsWith('$ ')) return 'activity-line--command'
@@ -121,12 +122,29 @@ export function LauncherApp() {
 
       <section className="launcher-content">
         <div className="status-column">
-          <div className={`status-symbol ${isError ? 'status-symbol--error' : ''}`}>
-            {isError ? <CircleAlert aria-hidden="true" /> : <Activity aria-hidden="true" />}
-          </div>
-
           <div className="status-copy" aria-live="polite">
-            <h1>{state.title}</h1>
+            <div className="status-heading-row">
+              <div
+                className={`status-symbol ${
+                  isError
+                    ? 'status-symbol--error'
+                    : isLoading
+                      ? 'status-symbol--loading'
+                      : 'status-symbol--ready'
+                }`}
+              >
+                {isError ? (
+                  <CircleAlert aria-hidden="true" />
+                ) : isLoading ? (
+                  <span className="launcher-spinner" aria-label="正在加载">
+                    <LoaderCircle aria-hidden="true" />
+                  </span>
+                ) : (
+                  <Activity aria-hidden="true" />
+                )}
+              </div>
+              <h1>{state.title}</h1>
+            </div>
             <p>{state.detail}</p>
           </div>
 

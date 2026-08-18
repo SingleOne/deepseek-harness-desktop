@@ -1,6 +1,7 @@
 import { homedir } from 'node:os'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { parse as parseYaml } from 'yaml'
 import type { InstalledPlugin } from '../shared/plugin-market'
 import {
   allowPnpmBuild,
@@ -21,6 +22,15 @@ interface ProfileManifest {
 interface PackageManifest {
   version?: unknown
   repository?: unknown
+}
+
+interface PnpmLockfile {
+  importers?: Record<
+    string,
+    {
+      dependencies?: Record<string, unknown>
+    }
+  >
 }
 
 function expandHome(value: string): string {
@@ -64,6 +74,36 @@ async function readJson<T>(filePath: string): Promise<T | null> {
   }
 }
 
+async function readLockedRevisions(filePath: string): Promise<Map<string, string>> {
+  let source: string
+  try {
+    source = await readFile(filePath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Map()
+    throw new Error(`无法读取 ${filePath}：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  let lockfile: PnpmLockfile | null
+  try {
+    lockfile = parseYaml(source) as PnpmLockfile | null
+  } catch {
+    return new Map()
+  }
+  const dependencies = lockfile?.importers?.['.']?.dependencies ?? {}
+  const revisions = new Map<string, string>()
+  for (const [packageName, value] of Object.entries(dependencies)) {
+    const version =
+      typeof value === 'string'
+        ? value
+        : value && typeof value === 'object' && 'version' in value && typeof value.version === 'string'
+          ? value.version
+          : undefined
+    const revision = version?.match(/[0-9a-f]{40}/i)?.[0]
+    if (revision) revisions.set(packageName, revision.toLowerCase())
+  }
+  return revisions
+}
+
 export class PluginProfileService {
   readonly profileDirectory = path.join(resolveDshHome(), 'profiles', 'web')
 
@@ -97,6 +137,9 @@ export class PluginProfileService {
         ? bundleValues.filter((value): value is string => typeof value === 'string')
         : []
     )
+    const lockedRevisions = await readLockedRevisions(
+      path.join(this.profileDirectory, 'pnpm-lock.yaml')
+    )
 
     const installed: InstalledPlugin[] = []
     for (const [packageName, sourceValue] of Object.entries(dependencies)) {
@@ -108,6 +151,7 @@ export class PluginProfileService {
       installed.push({
         packageName,
         version: typeof manifest?.version === 'string' ? manifest.version : undefined,
+        installedRevision: lockedRevisions.get(packageName),
         sourceSpec,
         repositoryUrl: repositoryUrl(manifest?.repository)
       })

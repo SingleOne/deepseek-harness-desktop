@@ -55,11 +55,6 @@ export class PluginService {
 
   async listInstalled(): Promise<InstalledPlugin[]> {
     const installed = await this.profile.listInstalled()
-    try {
-      await this.catalog.getCatalog()
-    } catch {
-      // Installed plugins remain manageable when the remote catalog is unavailable.
-    }
     return installed.map((plugin) => ({
       ...plugin,
       catalogId: this.catalog.findCatalogId(plugin)

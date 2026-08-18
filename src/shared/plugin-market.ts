@@ -38,9 +38,34 @@ export interface PluginCatalogSnapshot {
 export interface InstalledPlugin {
   packageName: string
   version?: string
+  installedRevision?: string
   sourceSpec: string
   repositoryUrl?: string
   catalogId?: string
+}
+
+export type PluginUpdateStatus =
+  | 'available'
+  | 'up-to-date'
+  | 'pinned'
+  | 'unsupported'
+  | 'unavailable'
+
+export interface PluginUpdateInfo {
+  packageName: string
+  source: 'npm' | 'github' | 'other'
+  status: PluginUpdateStatus
+  installedVersion?: string
+  latestVersion?: string
+  installedRevision?: string
+  latestRevision?: string
+  checkedAt: string
+  error?: string
+}
+
+export interface PluginUpdateSummary {
+  availableCount: number
+  checkedAt?: string
 }
 
 export type PluginOperationPhase =
@@ -74,10 +99,13 @@ export interface DesktopMainApi {
   restartDsh(): Promise<void>
   getCatalog(refresh?: boolean): Promise<PluginCatalogSnapshot>
   getInstalled(): Promise<InstalledPlugin[]>
+  getUpdateSummary(): Promise<PluginUpdateSummary>
+  checkUpdates(refresh?: boolean): Promise<PluginUpdateInfo[]>
   install(catalogId: string): Promise<PluginOperationResult>
   remove(packageName: string): Promise<PluginOperationResult>
   subscribeOperation(listener: (state: PluginOperationState) => void): () => void
   openCatalogPlugin(catalogId: string): Promise<void>
+  openCatalogSource(): Promise<void>
 }
 
 export const mainChannels = {
@@ -91,9 +119,12 @@ export const mainChannels = {
 export const pluginChannels = {
   catalog: 'plugins:catalog',
   installed: 'plugins:installed',
+  updateSummary: 'plugins:update-summary',
+  updates: 'plugins:updates',
   install: 'plugins:install',
   remove: 'plugins:remove',
   operationState: 'plugins:operation-state',
   requestOperationState: 'plugins:operation-state:request',
-  openCatalogPlugin: 'plugins:open-catalog-plugin'
+  openCatalogPlugin: 'plugins:open-catalog-plugin',
+  openCatalogSource: 'plugins:open-catalog-source'
 } as const

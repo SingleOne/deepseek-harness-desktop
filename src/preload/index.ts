@@ -53,6 +53,12 @@ const mainApi: DesktopMainApi = {
   getInstalled() {
     return ipcRenderer.invoke(pluginChannels.installed)
   },
+  getUpdateSummary() {
+    return ipcRenderer.invoke(pluginChannels.updateSummary)
+  },
+  checkUpdates(refresh = false) {
+    return ipcRenderer.invoke(pluginChannels.updates, refresh)
+  },
   install(catalogId) {
     return ipcRenderer.invoke(pluginChannels.install, catalogId)
   },
@@ -68,6 +74,9 @@ const mainApi: DesktopMainApi = {
   },
   openCatalogPlugin(catalogId) {
     return ipcRenderer.invoke(pluginChannels.openCatalogPlugin, catalogId)
+  },
+  openCatalogSource() {
+    return ipcRenderer.invoke(pluginChannels.openCatalogSource)
   }
 }
 
