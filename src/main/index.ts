@@ -15,7 +15,7 @@ import { PluginService } from './plugin-service'
 import { PluginUpdateService } from './plugin-update-service'
 import { bundledPnpmBinDirectory, selectPnpmRuntime } from './pnpm-runtime'
 import type { PnpmGitBuildApproval } from './pnpm-build-policy'
-import { applicationIcon, createLauncherWindow, createMainWindow } from './windows'
+import { applicationIcon, createLauncherWindow, createMainWindow, trayIcon } from './windows'
 
 const runtimeDataDirectory = path.join(os.tmpdir(), 'deepseek-harness-desktop', String(process.pid))
 const catalogSourceRepositoryUrl = 'https://github.com/awesome-dsh-plugin/awesome-dsh-plugin'
@@ -107,7 +107,7 @@ if (!hasSingleInstanceLock) {
   })
 
   void app.whenReady().then(async () => {
-    tray = new Tray(applicationIcon)
+    tray = new Tray(trayIcon)
     tray.setToolTip('dsh-desktop')
     tray.setContextMenu(
       Menu.buildFromTemplate([

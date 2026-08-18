@@ -47,6 +47,7 @@
     "files": [
       "out/**/*",
       "resources/icon.png",
+      "resources/tray-icon.ico",
       "package.json"
     ],
     "extraResources": [

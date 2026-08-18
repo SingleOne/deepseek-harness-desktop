@@ -11,6 +11,10 @@ import { buildDshSessionActivationSource } from './notification-protocol'
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url))
 export const applicationIcon = path.join(currentDirectory, '../../resources/icon.png')
+export const trayIcon =
+  process.platform === 'win32'
+    ? path.join(currentDirectory, '../../resources/tray-icon.ico')
+    : applicationIcon
 const titlebarHeight = 44
 const mainNavigationHeight = 64
 

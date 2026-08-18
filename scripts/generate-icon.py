@@ -4,6 +4,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 
 SIZE = 1024
+ICON_CROP_BOUNDS = (76, 76, 949, 949)
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIRECTORY = ROOT / "resources"
 BASE_ICON = OUTPUT_DIRECTORY / "icon-base-whale.png"
@@ -165,7 +166,8 @@ def generate_icon() -> Image.Image:
     icon = render_background()
     icon = add_whale(icon, extract_whale_without_fin(base_icon))
     icon = add_terminal_prompt(icon)
-    return add_thought_squares(icon)
+    icon = add_thought_squares(icon)
+    return icon.crop(ICON_CROP_BOUNDS).resize((SIZE, SIZE), Image.Resampling.LANCZOS)
 
 
 def main() -> None:
@@ -177,6 +179,21 @@ def main() -> None:
         OUTPUT_DIRECTORY / "icon.ico",
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+    )
+    icon.save(
+        OUTPUT_DIRECTORY / "tray-icon.ico",
+        format="ICO",
+        sizes=[
+            (16, 16),
+            (20, 20),
+            (24, 24),
+            (32, 32),
+            (40, 40),
+            (48, 48),
+            (64, 64),
+            (128, 128),
+            (256, 256),
+        ],
     )
 
 
