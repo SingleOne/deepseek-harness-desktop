@@ -1,5 +1,6 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import { fileURLToPath } from 'node:url'
 
 export default defineConfig({
   main: {
@@ -8,6 +9,16 @@ export default defineConfig({
         process.env.DEEPSEEK_HARNESS_DESKTOP_UPDATE_RELEASE_URL?.trim() ||
           'https://github.com/SingleOne/deepseek-harness-desktop/releases/latest'
       )
+    },
+    build: {
+      rollupOptions: {
+        input: {
+          index: fileURLToPath(new URL('./src/main/index.ts', import.meta.url)),
+          'plugin-security-worker': fileURLToPath(
+            new URL('./src/main/plugin-security-worker.ts', import.meta.url)
+          )
+        }
+      }
     },
     plugins: [externalizeDepsPlugin()]
   },

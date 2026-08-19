@@ -8,18 +8,21 @@
     "dev": "electron-vite dev",
     "dev:debug": "electron-vite dev -- --launcher-debug",
     "generate:icon": "python scripts/generate-icon.py",
-    "build": "electron-vite build",
-    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "build:scanner": "tsc -p packages/security-scanner/tsconfig.build.json",
+    "build": "npm run build:scanner && electron-vite build",
+    "typecheck": "tsc --noEmit -p packages/security-scanner/tsconfig.json && tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "test": "vitest run",
     "check": "npm run typecheck && npm run test && npm run build",
     "package:win": "npm run build && electron-builder --win nsis",
     "package:mac": "npm run build && electron-builder --mac"
   },
   "dependencies": {
+    "@nodesecure/js-x-ray": "^11.0.1",
     "lucide-react": "1.31.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "semver": "7.8.5",
+    "tar-stream": "^3.2.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
@@ -27,6 +30,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@types/semver": "^7.7.1",
+    "@types/tar-stream": "^3.1.4",
     "@vitejs/plugin-react": "5.2.0",
     "electron": "43.4.0",
     "electron-builder": "26.15.3",

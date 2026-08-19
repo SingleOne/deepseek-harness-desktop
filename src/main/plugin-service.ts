@@ -2,7 +2,8 @@ import { app } from 'electron'
 import type { DshInstallation } from './dsh-service'
 import type {
   InstalledPlugin,
-  PluginOperationState
+  PluginOperationState,
+  PreparedPluginInstall
 } from '../shared/plugin-market'
 import { runDshCommandChecked, type DshCommandOptions } from './dsh-command'
 import { PluginCatalogService, type ResolvedCatalogItem } from './plugin-catalog-service'
@@ -12,6 +13,11 @@ import {
 } from './plugin-profile-service'
 import type { PluginUpdateTarget } from './plugin-update-service'
 import type { PnpmRuntime } from './pnpm-runtime'
+import {
+  type PluginSecurityService,
+  type PreparedSecurityArtifact,
+  type SecurityPreparationPhase
+} from './plugin-security-service'
 import {
   parsePnpmGitBuildApproval,
   type PnpmGitBuildApproval
@@ -33,6 +39,11 @@ interface PluginAddTarget {
   repositoryUrl?: string
 }
 
+interface PreparedInstallRecord {
+  plugin: ResolvedCatalogItem
+  artifact: PreparedSecurityArtifact
+}
+
 class PluginInstallCancelledError extends Error {
   constructor() {
     super('用户取消了 GitHub 插件构建授权')
@@ -47,12 +58,14 @@ export class PluginService {
   private state: PluginOperationState = { phase: 'idle', logs: [] }
   private readonly listeners = new Set<OperationListener>()
   private busy = false
+  private prepared: PreparedInstallRecord | null = null
 
   constructor(
     private readonly catalog: PluginCatalogService,
     private readonly profile: PluginProfileService,
     private readonly runtime: PluginRuntimeHooks,
-    private readonly pnpmRuntime: PnpmRuntime = { source: 'system' }
+    private readonly pnpmRuntime: PnpmRuntime = { source: 'system' },
+    private readonly security?: PluginSecurityService
   ) {}
 
   get currentState(): PluginOperationState {
@@ -73,6 +86,7 @@ export class PluginService {
   }
 
   async install(catalogId: string): Promise<boolean> {
+    if (this.security) throw new Error('启用安全扫描后必须先准备并确认安装')
     if (this.busy) throw new Error('已有插件操作正在进行')
     this.busy = true
     let plugin: ResolvedCatalogItem
@@ -86,6 +100,99 @@ export class PluginService {
       this.busy = false
       throw error
     }
+    return this.installResolved(plugin, installation, pnpmOptions)
+  }
+
+  async prepareInstall(catalogId: string): Promise<PreparedPluginInstall> {
+    if (!this.security) throw new Error('插件安全扫描服务尚未启用')
+    if (this.busy) throw new Error('已有插件操作正在进行')
+    this.busy = true
+    this.setState({
+      phase: 'resolving-artifact',
+      action: 'install',
+      pluginName: undefined,
+      detail: '正在准备插件安全扫描',
+      error: undefined,
+      logs: []
+    })
+    try {
+      const plugin = await this.catalog.getPlugin(catalogId)
+      const installation = this.requireInstallation()
+      this.requirePnpm(installation)
+      this.setState({
+        phase: 'resolving-artifact',
+        action: 'install',
+        pluginName: plugin.name,
+        detail: `正在解析 ${plugin.name} 的精确制品`,
+        logs: []
+      })
+      const artifact = await this.security.prepare(plugin, (phase, detail) => {
+        this.setSecurityPhase(phase, detail)
+      })
+      this.prepared = {
+        plugin: { ...plugin, installSpec: artifact.installSpec },
+        artifact
+      }
+      this.setState({
+        phase: 'awaiting-security-review',
+        detail: `安全扫描完成：${artifact.report.recommendation.toUpperCase()}`
+      })
+      return { id: artifact.id, pluginName: plugin.name, report: artifact.report }
+    } catch (error) {
+      this.busy = false
+      const message = errorMessage(error)
+      this.setState({ phase: 'failed', detail: '插件安全扫描失败', error: message })
+      throw error
+    }
+  }
+
+  async cancelPreparedInstall(preparedId: string): Promise<void> {
+    const prepared = this.requirePrepared(preparedId)
+    this.prepared = null
+    await this.security?.discard(prepared.artifact).catch(() => undefined)
+    this.busy = false
+    this.setState({ phase: 'idle', detail: `${prepared.plugin.name} 安装已取消` })
+  }
+
+  async commitInstall(preparedId: string): Promise<boolean> {
+    const prepared = this.requirePrepared(preparedId)
+    const report = prepared.artifact.report
+    if (report.recommendation === 'block' ||
+        report.findings.some((finding) => finding.severity === 'critical')) {
+      await this.cancelPreparedInstall(preparedId)
+      throw new Error('扫描发现严重危险代码，已阻止安装')
+    }
+    let installation: DshInstallation
+    let pnpmOptions: DshCommandOptions
+    try {
+      installation = this.requireInstallation()
+      pnpmOptions = this.requirePnpm(installation)
+      await this.security?.verify(prepared.artifact)
+    } catch (error) {
+      await this.cancelPreparedInstall(preparedId)
+      throw error
+    }
+    this.prepared = null
+    try {
+      return await this.installResolved(
+        prepared.plugin,
+        installation,
+        pnpmOptions,
+        prepared.artifact.commit,
+        prepared.artifact.report.artifact.version
+      )
+    } finally {
+      await this.security?.discard(prepared.artifact).catch(() => undefined)
+    }
+  }
+
+  private async installResolved(
+    plugin: ResolvedCatalogItem,
+    installation: DshInstallation,
+    pnpmOptions: DshCommandOptions,
+    expectedCommit?: string,
+    expectedVersion?: string
+  ): Promise<boolean> {
     this.setState({
       phase: 'stopping-dsh',
       action: 'install',
@@ -103,11 +210,20 @@ export class PluginService {
       this.setState({ phase: 'installing', detail: `正在安装 ${plugin.name}` })
       await this.addPlugin(installation, plugin, pnpmOptions)
 
+      this.setState({
+        phase: 'verifying-installed-artifact',
+        detail: '正在核对已安装插件与扫描制品'
+      })
       const installed = await this.listInstalled()
-      const validPlugin = installed.some(
+      const installedPlugin = installed.find(
         (item) =>
           item.catalogId === plugin.id ||
           (plugin.npmPackage !== undefined && item.packageName === plugin.npmPackage)
+      )
+      const validPlugin = Boolean(
+        installedPlugin &&
+        (!expectedCommit || installedPlugin.installedRevision === expectedCommit) &&
+        (!expectedVersion || installedPlugin.version === expectedVersion)
       )
       if (!validPlugin) {
         const afterDependencies = await this.profile.listDirectDependencies()
@@ -124,7 +240,11 @@ export class PluginService {
             pnpmOptions
           )
         }
-        throw new Error('安装包没有作为有效的 DSH bundle 加入 web profile')
+        throw new Error(
+          installedPlugin && (expectedCommit || expectedVersion)
+            ? '安装后的插件版本或 commit 与已扫描制品不一致'
+            : '安装包没有作为有效的 DSH bundle 加入 web profile'
+        )
       }
 
       this.setState({ phase: 'validating', detail: '正在解析 web profile 配置' })
@@ -338,6 +458,17 @@ export class PluginService {
     return true
   }
 
+  private requirePrepared(preparedId: string): PreparedInstallRecord {
+    if (!this.prepared || this.prepared.artifact.id !== preparedId) {
+      throw new Error('安装准备记录无效或已经失效')
+    }
+    return this.prepared
+  }
+
+  private setSecurityPhase(phase: SecurityPreparationPhase, detail: string): void {
+    this.setState({ phase, detail })
+  }
+
   private requireInstallation(): DshInstallation {
     const installation = this.runtime.getInstallation()
     if (!installation) throw new Error('尚未找到可用的 DSH 安装')
@@ -432,7 +563,12 @@ export class PluginService {
   }
 
   private setState(patch: Partial<PluginOperationState>): void {
-    this.state = { ...this.state, ...patch }
+    const clearsPreviousError = patch.phase !== undefined && patch.phase !== 'failed'
+    this.state = {
+      ...this.state,
+      ...(clearsPreviousError ? { error: undefined } : {}),
+      ...patch
+    }
     for (const listener of this.listeners) listener(this.state)
   }
 }

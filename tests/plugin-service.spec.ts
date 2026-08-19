@@ -4,6 +4,12 @@ import type { PluginProfileService } from '../src/main/plugin-profile-service'
 import type { PluginUpdateTarget } from '../src/main/plugin-update-service'
 import type { PnpmRuntime } from '../src/main/pnpm-runtime'
 import type { PnpmGitBuildApproval } from '../src/main/pnpm-build-policy'
+import type { ScanReport } from '../packages/security-scanner/src'
+import type { PluginOperationState } from '../src/shared/plugin-market'
+import type {
+  PluginSecurityService,
+  PreparedSecurityArtifact
+} from '../src/main/plugin-security-service'
 
 vi.mock('electron', () => ({ app: { getPath: () => 'C:\\Users\\tester' } }))
 vi.mock('../src/main/dsh-command', () => ({ runDshCommandChecked: vi.fn() }))
@@ -28,7 +34,11 @@ const plugin: ResolvedCatalogItem = {
   installSpec: 'github:0xsline/dsh-spotlight'
 }
 
-function fixture(approved: boolean, pnpmRuntime?: PnpmRuntime) {
+function fixture(
+  approved: boolean,
+  pnpmRuntime?: PnpmRuntime,
+  security?: PluginSecurityService
+) {
   const catalog = {
     getPlugin: vi.fn().mockResolvedValue(plugin),
     getCatalog: vi.fn().mockResolvedValue({}),
@@ -67,8 +77,62 @@ function fixture(approved: boolean, pnpmRuntime?: PnpmRuntime) {
     catalog,
     profile,
     runtime,
-    service: new PluginService(catalog, profile, runtime, pnpmRuntime)
+    service: new PluginService(catalog, profile, runtime, pnpmRuntime, security)
   }
+}
+
+function securityFixture(recommendation: ScanReport['recommendation']) {
+  const report: ScanReport = {
+    schemaVersion: 1,
+    engine: {
+      id: '@dsh-desktop/security-scanner',
+      version: '0.1.0',
+      rulePacks: [{ id: '@dsh-desktop/rules-dsh', version: '0.1.0' }]
+    },
+    artifact: { source: 'github', digest: 'a'.repeat(128) },
+    recommendation,
+    coverage: {
+      complete: recommendation !== 'incomplete',
+      scannedFiles: 2,
+      skippedFiles: 0,
+      scannedBytes: 100,
+      astFiles: 1,
+      parseErrors: 0,
+      dependencyCoverage: 'artifact-manifest',
+      notes: []
+    },
+    dependencies: [],
+    resolvedDependencies: [],
+    supplyChain: {
+      osv: { status: 'not-run', queriedPackages: 0, vulnerabilityCount: 0 },
+      registrySignature: { status: 'not-applicable' },
+      provenance: { status: 'not-applicable' },
+      releaseAge: { status: 'not-applicable', minimumHours: 24 }
+    },
+    findings: [],
+    scannedAt: new Date().toISOString(),
+    durationMs: 10
+  }
+  const artifact: PreparedSecurityArtifact = {
+    id: 'prepared-test',
+    pluginId: plugin.id,
+    artifactPath: 'C:\\temp\\artifact.tgz',
+    temporaryDirectory: 'C:\\temp\\scanner',
+    installSpec: plugin.installSpec,
+    source: 'github',
+    digest: 'a'.repeat(128),
+    report,
+    expiresAt: Date.now() + 60_000
+  }
+  const service = {
+    prepare: vi.fn(async (_plugin, onPhase) => {
+      onPhase('scanning-artifact', '正在扫描测试制品')
+      return artifact
+    }),
+    verify: vi.fn().mockResolvedValue(undefined),
+    discard: vi.fn().mockResolvedValue(undefined)
+  } as unknown as PluginSecurityService
+  return { service, artifact }
 }
 
 beforeEach(() => {
@@ -232,5 +296,74 @@ describe('plugin update transaction', () => {
       phase: 'failed',
       detail: '插件更新失败且自动恢复未完成'
     })
+  })
+})
+
+describe('plugin security preparation', () => {
+  it('scans before stopping DSH and commits the prepared installation', async () => {
+    const security = securityFixture('review')
+    const { runtime, service } = fixture(true, undefined, security.service)
+    vi.mocked(runDshCommandChecked).mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+
+    const prepared = await service.prepareInstall(plugin.id)
+
+    expect(prepared.report.recommendation).toBe('review')
+    expect(runtime.stop).not.toHaveBeenCalled()
+    expect(service.currentState.phase).toBe('awaiting-security-review')
+
+    await expect(service.commitInstall(prepared.id)).resolves.toBe(true)
+    expect(runtime.stop).toHaveBeenCalledOnce()
+    expect(security.service.verify).toHaveBeenCalledOnce()
+    expect(security.service.discard).toHaveBeenCalledOnce()
+  })
+
+  it('does not commit a blocked scan result', async () => {
+    const security = securityFixture('block')
+    const { runtime, service } = fixture(true, undefined, security.service)
+
+    const prepared = await service.prepareInstall(plugin.id)
+
+    await expect(service.commitInstall(prepared.id)).rejects.toThrow('严重危险代码')
+    expect(runtime.stop).not.toHaveBeenCalled()
+    expect(runDshCommandChecked).not.toHaveBeenCalled()
+    expect(security.service.discard).toHaveBeenCalledOnce()
+    expect(service.currentState.phase).toBe('idle')
+  })
+
+  it('continues automatic installation when coverage is incomplete but no critical finding exists', async () => {
+    const security = securityFixture('incomplete')
+    const { service } = fixture(true, undefined, security.service)
+    vi.mocked(runDshCommandChecked).mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+
+    const prepared = await service.prepareInstall(plugin.id)
+
+    await expect(service.commitInstall(prepared.id)).resolves.toBe(true)
+    expect(security.service.verify).toHaveBeenCalledOnce()
+  })
+
+  it('clears a previous scan error as soon as the next plugin scan starts', async () => {
+    const security = securityFixture('pass')
+    const prepare = vi.mocked(security.service.prepare)
+    prepare
+      .mockRejectedValueOnce(new Error('插件制品超过 32 MiB 下载上限'))
+      .mockImplementationOnce(async (_plugin, onPhase) => {
+        onPhase('scanning-artifact', '正在扫描下一个插件')
+        return security.artifact
+      })
+    const { service } = fixture(true, undefined, security.service)
+    const states: PluginOperationState[] = []
+    service.subscribe((state) => states.push({ ...state }))
+
+    await expect(service.prepareInstall(plugin.id)).rejects.toThrow('32 MiB')
+    expect(service.currentState.error).toContain('32 MiB')
+
+    await expect(service.prepareInstall(plugin.id)).resolves.toBeDefined()
+
+    const nextScanStates = states.slice(states.findIndex((state) => state.phase === 'failed') + 1)
+    expect(nextScanStates).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ error: expect.stringContaining('32 MiB') })
+    ]))
+    expect(service.currentState.error).toBeUndefined()
+    expect(service.currentState.phase).toBe('awaiting-security-review')
   })
 })

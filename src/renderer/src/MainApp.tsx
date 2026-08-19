@@ -1,22 +1,27 @@
 import {
   Box,
+  CheckCircle2,
   Download,
   ExternalLink,
+  FileWarning,
   LoaderCircle,
   MessageSquare,
   PackageCheck,
   RefreshCw,
   Search,
   ShieldAlert,
+  ShieldCheck,
   Star,
   Store,
-  Trash2
+  Trash2,
+  X
 } from 'lucide-react'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type {
   DshRuntimeState,
   InstalledPlugin,
   MainSection,
+  PreparedPluginInstall,
   PluginCatalogSnapshot,
   PluginOperationState,
   PluginUpdateInfo
@@ -51,6 +56,10 @@ const initialOperation: PluginOperationState = {
 
 const activeOperationPhases = new Set<PluginOperationState['phase']>([
   'backing-up',
+  'resolving-artifact',
+  'downloading-artifact',
+  'scanning-artifact',
+  'awaiting-security-review',
   'stopping-dsh',
   'installing',
   'updating',
@@ -58,6 +67,7 @@ const activeOperationPhases = new Set<PluginOperationState['phase']>([
   'removing',
   'validating',
   'rolling-back',
+  'verifying-installed-artifact',
   'restarting-dsh'
 ])
 
@@ -90,6 +100,434 @@ function installedSourceLabel(source: 'npm' | 'github' | 'other'): string {
   if (source === 'github') return 'GitHub'
   if (source === 'npm') return 'npm'
   return '本地/其他'
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+}
+
+const verdictText = {
+  pass: '扫描通过',
+  review: '发现非阻断风险',
+  block: '已阻止',
+  incomplete: '覆盖不完整'
+} as const
+
+const severityText = {
+  critical: '严重',
+  high: '高',
+  medium: '中',
+  low: '低',
+  info: '信息'
+} as const
+
+const severityRank = {
+  info: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4
+} as const
+
+type SecurityFinding = PreparedPluginInstall['report']['findings'][number]
+type SecurityInstallStatus = 'scanning' | 'blocked' | 'installing' | 'installed' | 'cancelled' | 'failed' | 'closing'
+
+interface GroupedSecurityFinding {
+  ruleId: string
+  severity: SecurityFinding['severity']
+  title: string
+  description: string
+  sources: Array<Pick<SecurityFinding, 'file' | 'location' | 'evidence' | 'engine'>>
+}
+
+function isBlockingReport(report: PreparedPluginInstall['report']): boolean {
+  return report.recommendation === 'block' ||
+    report.findings.some((finding) => finding.severity === 'critical')
+}
+
+function groupSecurityFindings(findings: SecurityFinding[]): GroupedSecurityFinding[] {
+  const groups = new Map<string, GroupedSecurityFinding>()
+  const sourceKeys = new Map<string, Set<string>>()
+  for (const finding of findings) {
+    let group = groups.get(finding.ruleId)
+    if (!group) {
+      group = {
+        ruleId: finding.ruleId,
+        severity: finding.severity,
+        title: finding.title,
+        description: finding.description,
+        sources: []
+      }
+      groups.set(finding.ruleId, group)
+      sourceKeys.set(finding.ruleId, new Set())
+    } else if (severityRank[finding.severity] > severityRank[group.severity]) {
+      group.severity = finding.severity
+    }
+    const source = {
+      file: finding.file,
+      location: finding.location,
+      evidence: finding.evidence,
+      engine: finding.engine
+    }
+    const sourceKey = JSON.stringify(source)
+    const keys = sourceKeys.get(finding.ruleId)!
+    if (!keys.has(sourceKey)) {
+      keys.add(sourceKey)
+      group.sources.push(source)
+    }
+  }
+  return [...groups.values()]
+}
+
+function supplyChainStatus(report: PreparedPluginInstall['report']): Array<{
+  label: string
+  value: string
+  tone: 'ok' | 'warn' | 'danger' | 'neutral'
+}> {
+  const { supplyChain } = report
+  const signature = supplyChain.registrySignature.status
+  const release = supplyChain.releaseAge
+  return [
+    {
+      label: 'OSV 漏洞情报',
+      value: supplyChain.osv.status === 'complete'
+        ? `${supplyChain.osv.queriedPackages} 个版本 · ${supplyChain.osv.vulnerabilityCount} 个命中`
+        : supplyChain.osv.status === 'unavailable' ? '暂时不可用' : '未运行',
+      tone: supplyChain.osv.status === 'complete'
+        ? (supplyChain.osv.vulnerabilityCount > 0 ? 'warn' : 'ok')
+        : 'warn'
+    },
+    {
+      label: 'npm Registry 签名',
+      value: signature === 'verified' ? '验证通过'
+        : signature === 'not-applicable' ? '不适用'
+          : signature === 'missing' ? '未提供'
+            : signature === 'invalid' ? '验证失败'
+              : '暂时不可用',
+      tone: signature === 'verified' ? 'ok'
+        : signature === 'invalid' ? 'danger'
+          : signature === 'not-applicable' ? 'neutral' : 'warn'
+    },
+    {
+      label: '发布来源证明',
+      value: supplyChain.provenance.status === 'present-unverified' ? '已声明，未验证证明链'
+        : supplyChain.provenance.status === 'absent' ? '未提供'
+          : '不适用',
+      tone: supplyChain.provenance.status === 'present-unverified' ? 'warn' : 'neutral'
+    },
+    {
+      label: '版本观察期',
+      value: release.status === 'mature' ? `${Math.floor(release.ageHours ?? 0)} 小时`
+        : release.status === 'too-new' ? `${(release.ageHours ?? 0).toFixed(1)} 小时，不足 ${release.minimumHours} 小时`
+          : release.status === 'unknown' ? '发布时间未知'
+            : '不适用',
+      tone: release.status === 'mature' ? 'ok'
+        : release.status === 'too-new' ? 'warn' : 'neutral'
+    }
+  ]
+}
+
+interface SecurityReviewDialogProps {
+  preparation: PreparedPluginInstall
+  status: SecurityInstallStatus
+  onClose(): void
+}
+
+interface SecurityScanProgressDialogProps {
+  pluginName: string
+  detail?: string
+  error?: string
+  failed: boolean
+  onClose(): void
+}
+
+function SecurityScanProgressDialog({
+  pluginName,
+  detail,
+  error,
+  failed,
+  onClose
+}: SecurityScanProgressDialogProps) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (failed) closeButtonRef.current?.focus()
+  }, [failed])
+
+  return (
+    <div className="security-review-backdrop">
+      <section
+        className={`security-review security-review--${failed ? 'incomplete' : 'scanning'}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="security-scan-progress-title"
+      >
+        <header className="security-review-header">
+          <div className="security-review-heading-icon">
+            {failed
+              ? <ShieldAlert aria-hidden="true" />
+              : <LoaderCircle className="spin" aria-hidden="true" />}
+          </div>
+          <div>
+            <p className="eyebrow">PLUGIN SECURITY</p>
+            <h2 id="security-scan-progress-title">{pluginName}</h2>
+            <p>{failed ? '扫描未完成' : '正在执行安装前安全扫描'}</p>
+          </div>
+          <span className={`security-verdict security-verdict--${failed ? 'incomplete' : 'scanning'}`}>
+            {failed ? '扫描失败' : '扫描中'}
+          </span>
+          <button
+            className="security-review-close"
+            ref={closeButtonRef}
+            disabled={!failed}
+            onClick={onClose}
+            title="关闭扫描结果"
+            aria-label="关闭扫描结果"
+          >
+            <X aria-hidden="true" />
+          </button>
+        </header>
+
+        <div className="security-review-body security-scan-progress">
+          {failed ? <ShieldAlert aria-hidden="true" /> : <LoaderCircle className="spin" aria-hidden="true" />}
+          <h3>{detail ?? '正在准备插件安全扫描'}</h3>
+          <p>
+            {failed
+              ? error ?? '安全扫描执行失败。'
+              : '扫描完成后，未发现阻断级风险的插件将自动继续安装。'}
+          </p>
+        </div>
+
+        <footer className="security-review-footer">
+          <p>{failed ? '请关闭后重试或选择其他插件。' : '请保持此窗口打开，当前状态会自动更新。'}</p>
+          <div>
+            <button
+              className="market-button"
+              disabled={!failed}
+              onClick={onClose}
+            >
+              {!failed && <LoaderCircle className="spin" aria-hidden="true" />}
+              {failed ? '关闭' : '扫描中'}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  )
+}
+
+function SecurityReviewDialog({
+  preparation,
+  status,
+  onClose
+}: SecurityReviewDialogProps) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null)
+  const { report } = preparation
+  const submitting = status === 'installing' || status === 'closing'
+  const identity = report.artifact
+  const supplyChain = supplyChainStatus(report)
+  const findingGroups = groupSecurityFindings(report.findings)
+  const headerStatus: { label: string; tone: 'pass' | 'block' | 'incomplete' | 'scanning' } =
+    status === 'installing' ? { label: '自动安装中', tone: 'scanning' }
+      : status === 'installed' ? { label: '安装完成', tone: 'pass' }
+        : status === 'failed' ? { label: '安装失败', tone: 'incomplete' }
+          : status === 'cancelled' ? { label: '安装已取消', tone: 'incomplete' }
+            : status === 'closing' ? { label: '正在关闭', tone: 'scanning' }
+              : { label: '已阻止', tone: 'block' }
+  const identityVersion = identity.version
+    ? `v${identity.version}`
+    : identity.commit
+      ? identity.commit.slice(0, 12)
+      : '版本未知'
+
+  useEffect(() => {
+    if (!submitting) closeButtonRef.current?.focus()
+  }, [submitting])
+
+  return (
+    <div className="security-review-backdrop">
+      <section
+        className={`security-review security-review--${report.recommendation}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="security-review-title"
+      >
+        <header className="security-review-header">
+          <div className="security-review-heading-icon">
+            {report.recommendation === 'pass' ? (
+              <ShieldCheck aria-hidden="true" />
+            ) : (
+              <ShieldAlert aria-hidden="true" />
+            )}
+          </div>
+          <div>
+            <p className="eyebrow">PLUGIN SECURITY</p>
+            <h2 id="security-review-title">{preparation.pluginName}</h2>
+            <p>{identity.name ?? preparation.pluginName} · {identityVersion}</p>
+          </div>
+          <span className={`security-verdict security-verdict--${headerStatus.tone}`}>
+            {headerStatus.label}
+          </span>
+          <button
+            className="security-review-close"
+            disabled={submitting}
+            onClick={onClose}
+            title="关闭扫描结果"
+            aria-label="关闭扫描结果"
+          >
+            <X aria-hidden="true" />
+          </button>
+        </header>
+
+        <div className="security-review-body">
+          <div className="security-summary-grid">
+            <div>
+              <span>扫描文件</span>
+              <strong>{report.coverage.scannedFiles}</strong>
+            </div>
+            <div>
+              <span>扫描内容</span>
+              <strong>{formatBytes(report.coverage.scannedBytes)}</strong>
+            </div>
+            <div>
+              <span>AST 文件</span>
+              <strong>{report.coverage.astFiles}</strong>
+            </div>
+            <div>
+              <span>风险类型</span>
+              <strong>{findingGroups.length}</strong>
+            </div>
+          </div>
+
+          <dl className="security-artifact-details">
+            <div>
+              <dt>制品摘要</dt>
+              <dd title={identity.digest}>{identity.digest ?? '未知'}</dd>
+            </div>
+            <div>
+              <dt>扫描器</dt>
+              <dd>{report.engine.id} v{report.engine.version}</dd>
+            </div>
+            <div>
+              <dt>扫描结论</dt>
+              <dd>{verdictText[report.recommendation]}</dd>
+            </div>
+            <div>
+              <dt>依赖覆盖</dt>
+              <dd>
+                {report.coverage.dependencyCoverage === 'locked-tree'
+                  ? `pnpm 锁定生产树 · ${report.resolvedDependencies.length} 个传递版本`
+                  : `制品 package.json · ${report.dependencies.filter((dependency) => dependency.exactVersion).length} 个精确版本`}
+              </dd>
+            </div>
+          </dl>
+
+          <section className="security-supply-chain" aria-label="供应链信号">
+            <div className="security-section-heading">
+              <h3>供应链信号</h3>
+              <span>在线核验</span>
+            </div>
+            <div className="security-signal-grid">
+              {supplyChain.map((signal) => (
+                <div className={`security-signal security-signal--${signal.tone}`} key={signal.label}>
+                  <span>{signal.label}</span>
+                  <strong>{signal.value}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {report.coverage.notes.length > 0 && (
+            <div className="security-coverage-notes">
+              <FileWarning aria-hidden="true" />
+              <div>
+                <strong>覆盖说明</strong>
+                <ul>
+                  {report.coverage.notes.map((note) => <li key={note}>{note}</li>)}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          <section className="security-findings" aria-label="扫描发现">
+            <div className="security-section-heading">
+              <h3>扫描发现</h3>
+              <span>{findingGroups.length} 类 · {report.findings.length} 处</span>
+            </div>
+            {report.findings.length === 0 ? (
+              <div className="security-empty-findings">
+                <CheckCircle2 aria-hidden="true" />
+                <p>未发现需要人工确认或阻止安装的风险项。</p>
+              </div>
+            ) : (
+              <div className="security-finding-list">
+                {findingGroups.map((finding) => (
+                  <article
+                    className={`security-finding security-finding--${finding.severity}`}
+                    key={finding.ruleId}
+                  >
+                    <div className="security-finding-topline">
+                      <span>{severityText[finding.severity]}</span>
+                      <code>{finding.ruleId}</code>
+                    </div>
+                    <h4>{finding.title}</h4>
+                    <p>{finding.description}</p>
+                    <div className="security-finding-sources">
+                      <strong>来源（{finding.sources.length}）</strong>
+                      <ul>
+                        {finding.sources.map((source, index) => (
+                          <li key={`${source.file ?? source.engine}:${source.location?.line ?? ''}:${index}`}>
+                            <div>
+                              <code>
+                                {source.file
+                                  ? `${source.file}${source.location?.line ? `:${source.location.line}` : ''}`
+                                  : source.engine}
+                              </code>
+                              {source.file && <span>{source.engine}</span>}
+                            </div>
+                            {source.evidence && <pre>{source.evidence}</pre>}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <footer className="security-review-footer">
+          <p>
+            {status === 'blocked'
+              ? '扫描发现严重危险代码，Desktop 已阻止安装。'
+              : status === 'installing'
+                ? '未发现阻断级风险，正在自动安装。'
+                : status === 'installed'
+                  ? '未发现阻断级风险，插件已自动安装完成。'
+                  : status === 'cancelled'
+                    ? '自动安装已取消。'
+                    : status === 'closing'
+                      ? '正在关闭扫描结果。'
+                      : '自动安装失败，请查看操作面板。'}
+          </p>
+          <div>
+            <button
+              className="market-button"
+              ref={closeButtonRef}
+              disabled={submitting}
+              onClick={onClose}
+            >
+              {submitting && <LoaderCircle className="spin" aria-hidden="true" />}
+              {status === 'closing' ? '正在关闭' : submitting ? '自动安装中' : '关闭'}
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+  )
 }
 
 function PluginDescription({ description }: { description: string }) {
@@ -129,6 +567,9 @@ export function MainApp() {
   const [updates, setUpdates] = useState<PluginUpdateInfo[] | null>(null)
   const [updatesLoading, setUpdatesLoading] = useState(false)
   const [updatesError, setUpdatesError] = useState<string>()
+  const [securityScanPluginName, setSecurityScanPluginName] = useState<string>()
+  const [securityReview, setSecurityReview] = useState<PreparedPluginInstall | null>(null)
+  const [securityInstallStatus, setSecurityInstallStatus] = useState<SecurityInstallStatus>('blocked')
   const [availableUpdateCount, setAvailableUpdateCount] = useState(0)
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('all')
@@ -291,16 +732,57 @@ export function MainApp() {
 
   const busy = activeOperationPhases.has(operation.phase)
 
-  const installPlugin = async (catalogId: string): Promise<void> => {
+  const installPlugin = async (catalogId: string, pluginName: string): Promise<void> => {
     if (!api || busy) return
     setActionError(undefined)
+    setSecurityInstallStatus('scanning')
+    setSecurityScanPluginName(pluginName)
     try {
-      const result = await api.install(catalogId)
-      if (result.status === 'completed') {
-        await loadInstalled()
-        await loadUpdates(true)
+      const prepared = await api.prepareInstall(catalogId)
+      setSecurityScanPluginName(undefined)
+      if (isBlockingReport(prepared.report)) {
+        setSecurityInstallStatus('blocked')
+        setSecurityReview(prepared)
+        return
+      }
+      setSecurityInstallStatus('installing')
+      setSecurityReview(prepared)
+      try {
+        const result = await api.commitInstall(prepared.id)
+        setSecurityInstallStatus(result.status === 'completed' ? 'installed' : 'cancelled')
+        if (result.status === 'completed') {
+          await loadInstalled()
+          setUpdates(null)
+        }
+      } catch (error) {
+        setSecurityInstallStatus('failed')
+        setActionError(messageOf(error))
       }
     } catch (error) {
+      setSecurityInstallStatus('failed')
+      setActionError(messageOf(error))
+    }
+  }
+
+  const closeFailedSecurityScan = (): void => {
+    if (securityInstallStatus !== 'failed') return
+    setSecurityScanPluginName(undefined)
+  }
+
+  const closeSecurityReview = async (): Promise<void> => {
+    if (!api || !securityReview || securityInstallStatus === 'installing' || securityInstallStatus === 'closing') return
+    if (securityInstallStatus !== 'blocked') {
+      setSecurityReview(null)
+      return
+    }
+    const preparedId = securityReview.id
+    setSecurityInstallStatus('closing')
+    setActionError(undefined)
+    try {
+      await api.cancelInstall(preparedId)
+      setSecurityReview(null)
+    } catch (error) {
+      setSecurityInstallStatus('blocked')
       setActionError(messageOf(error))
     }
   }
@@ -409,18 +891,20 @@ export function MainApp() {
       <section className="main-workspace">
         {section === 'dsh' && (
           <div className={`runtime-placeholder runtime-placeholder--${runtime.phase}`}>
-            {runtime.phase === 'starting' && <LoaderCircle className="spin" aria-hidden="true" />}
-            {runtime.phase === 'error' ? <ShieldAlert aria-hidden="true" /> : <MessageSquare aria-hidden="true" />}
-            <h1>
-              {runtime.phase === 'starting'
-                ? '正在启动 DSH'
-                : runtime.phase === 'error'
-                  ? 'DSH 启动失败'
-                  : runtime.phase === 'ready'
-                    ? '正在载入 DSH'
-                    : 'DSH 已停止'}
-            </h1>
-            <p>{runtime.detail}</p>
+            <div className="runtime-title-row">
+              {runtime.phase === 'starting' && <LoaderCircle className="spin" aria-hidden="true" />}
+              {runtime.phase === 'error' && <ShieldAlert aria-hidden="true" />}
+              <h1>
+                {runtime.phase === 'starting'
+                  ? `正在启动 DSH${runtime.version ? ` ${runtime.version}` : ''}`
+                  : runtime.phase === 'error'
+                    ? 'DSH 启动失败'
+                    : runtime.phase === 'ready'
+                      ? '正在载入 DSH'
+                      : 'DSH 已停止'}
+              </h1>
+            </div>
+            {runtime.phase !== 'starting' && <p>{runtime.detail}</p>}
             {runtime.phase === 'error' && (
               <div className="runtime-actions">
                 <button className="market-button market-button--primary" onClick={() => void restartDsh()}>
@@ -561,7 +1045,7 @@ export function MainApp() {
                           onClick={() =>
                             void (installedPlugin
                               ? updatePlugin(installedPlugin.packageName)
-                              : installPlugin(plugin.id))
+                              : installPlugin(plugin.id, plugin.name))
                           }
                         >
                           {canUpdate ? (
@@ -709,6 +1193,26 @@ export function MainApp() {
             </details>
           )}
         </aside>
+      )}
+
+      {securityScanPluginName && !securityReview && (
+        <SecurityScanProgressDialog
+          pluginName={securityScanPluginName}
+          detail={operation.pluginName === securityScanPluginName
+            ? operation.detail
+            : '正在准备插件安全扫描'}
+          error={actionError ?? operation.error}
+          failed={securityInstallStatus === 'failed'}
+          onClose={closeFailedSecurityScan}
+        />
+      )}
+
+      {securityReview && (
+        <SecurityReviewDialog
+          preparation={securityReview}
+          status={securityInstallStatus}
+          onClose={() => void closeSecurityReview()}
+        />
       )}
     </main>
   )

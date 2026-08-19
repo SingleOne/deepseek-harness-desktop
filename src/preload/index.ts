@@ -62,8 +62,14 @@ const mainApi: DesktopMainApi = {
   update(packageName) {
     return ipcRenderer.invoke(pluginChannels.update, packageName)
   },
-  install(catalogId) {
-    return ipcRenderer.invoke(pluginChannels.install, catalogId)
+  prepareInstall(catalogId) {
+    return ipcRenderer.invoke(pluginChannels.prepareInstall, catalogId)
+  },
+  commitInstall(preparedId) {
+    return ipcRenderer.invoke(pluginChannels.commitInstall, preparedId)
+  },
+  cancelInstall(preparedId) {
+    return ipcRenderer.invoke(pluginChannels.cancelInstall, preparedId)
   },
   remove(packageName) {
     return ipcRenderer.invoke(pluginChannels.remove, packageName)

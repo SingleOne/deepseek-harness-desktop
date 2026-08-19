@@ -1,0 +1,29 @@
+{
+  "name": "@dsh-desktop/security-scanner",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./rules/dsh": {
+      "types": "./dist/rules/dsh.d.ts",
+      "import": "./dist/rules/dsh.js"
+    }
+  },
+  "dependencies": {
+    "@nodesecure/js-x-ray": "^11.0.1",
+    "tar-stream": "^3.2.0"
+  }
+}

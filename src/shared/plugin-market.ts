@@ -1,3 +1,5 @@
+import type { ScanReport } from '../../packages/security-scanner/src/types.js'
+
 export type MainSection = 'dsh' | 'market' | 'installed'
 
 export type DshRuntimePhase = 'starting' | 'ready' | 'stopped' | 'error'
@@ -38,6 +40,7 @@ export interface PluginCatalogSnapshot {
 export interface InstalledPlugin {
   packageName: string
   version?: string
+  installedRevision?: string
   sourceSpec: string
   repositoryUrl?: string
   catalogId?: string
@@ -69,6 +72,10 @@ export interface PluginUpdateSummary {
 export type PluginOperationPhase =
   | 'idle'
   | 'backing-up'
+  | 'resolving-artifact'
+  | 'downloading-artifact'
+  | 'scanning-artifact'
+  | 'awaiting-security-review'
   | 'stopping-dsh'
   | 'installing'
   | 'updating'
@@ -76,6 +83,7 @@ export type PluginOperationPhase =
   | 'removing'
   | 'validating'
   | 'rolling-back'
+  | 'verifying-installed-artifact'
   | 'restarting-dsh'
   | 'succeeded'
   | 'failed'
@@ -93,6 +101,12 @@ export interface PluginOperationResult {
   status: 'completed' | 'cancelled'
 }
 
+export interface PreparedPluginInstall {
+  id: string
+  pluginName: string
+  report: ScanReport
+}
+
 export interface DesktopMainApi {
   setSection(section: MainSection): void
   subscribeSection(listener: (section: MainSection) => void): () => void
@@ -103,7 +117,9 @@ export interface DesktopMainApi {
   getUpdateSummary(): Promise<PluginUpdateSummary>
   checkUpdates(refresh?: boolean): Promise<PluginUpdateInfo[]>
   update(packageName: string): Promise<PluginOperationResult>
-  install(catalogId: string): Promise<PluginOperationResult>
+  prepareInstall(catalogId: string): Promise<PreparedPluginInstall>
+  commitInstall(preparedId: string): Promise<PluginOperationResult>
+  cancelInstall(preparedId: string): Promise<PluginOperationResult>
   remove(packageName: string): Promise<PluginOperationResult>
   subscribeOperation(listener: (state: PluginOperationState) => void): () => void
   openCatalogPlugin(catalogId: string): Promise<void>
@@ -124,7 +140,9 @@ export const pluginChannels = {
   updateSummary: 'plugins:update-summary',
   updates: 'plugins:updates',
   update: 'plugins:update',
-  install: 'plugins:install',
+  prepareInstall: 'plugins:install:prepare',
+  commitInstall: 'plugins:install:commit',
+  cancelInstall: 'plugins:install:cancel',
   remove: 'plugins:remove',
   operationState: 'plugins:operation-state',
   requestOperationState: 'plugins:operation-state:request',

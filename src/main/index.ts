@@ -11,9 +11,11 @@ import { LauncherController } from './launcher-controller'
 import { startNotificationBridge, type NotificationBridge } from './notification-bridge'
 import { PluginCatalogService } from './plugin-catalog-service'
 import { PluginProfileService } from './plugin-profile-service'
+import { PluginSecurityService } from './plugin-security-service'
 import { PluginService } from './plugin-service'
 import { PluginUpdateService } from './plugin-update-service'
 import { bundledPnpmBinDirectory, selectPnpmRuntime } from './pnpm-runtime'
+import { PluginDependencyLockService } from './plugin-dependency-lock-service'
 import type { PnpmGitBuildApproval } from './pnpm-build-policy'
 import { applicationIcon, createLauncherWindow, createMainWindow, trayIcon } from './windows'
 
@@ -185,6 +187,10 @@ if (!hasSingleInstanceLock) {
         `pnpm 运行时：${pnpmRuntime.source === 'bundled' ? '桌面 App 内置' : '系统 PATH'} ${pnpmRuntime.version ?? ''}`.trim()
       )
     }
+    const securityService = new PluginSecurityService(
+      undefined,
+      new PluginDependencyLockService(pnpmRuntime)
+    )
     pluginService = new PluginService(catalogService, profileService, {
       getInstallation: () => controller?.currentInstallation ?? null,
       stop: (detail) => controller?.stopDshForPluginOperation(detail) ?? Promise.resolve(),
@@ -212,7 +218,7 @@ if (!hasSingleInstanceLock) {
         })
         return result.response === 0
       }
-    }, pnpmRuntime)
+    }, pnpmRuntime, securityService)
 
     const isMainSender = (sender: Electron.WebContents): boolean =>
       controller?.mainBrowserWindow?.webContents === sender
@@ -296,32 +302,29 @@ if (!hasSingleInstanceLock) {
       })
       return { status: completed ? 'completed' : 'cancelled' } as const
     })
-    ipcMain.handle(pluginChannels.install, async (event, catalogId: unknown) => {
+    ipcMain.handle(pluginChannels.prepareInstall, async (event, catalogId: unknown) => {
       requireMainSender(event.sender)
       if (typeof catalogId !== 'string') throw new Error('无效的插件目录 ID')
-      const plugin = await catalogService.getPlugin(catalogId)
-      const window = controller?.mainBrowserWindow
-      if (!window) throw new Error('桌面主窗口尚未就绪')
-      const result = await dialog.showMessageBox(window, {
-        type: 'warning',
-        title: '安装第三方插件',
-        message: `确认安装 ${plugin.name}？`,
-        detail:
-          `来源：${plugin.source === 'npm' ? plugin.npmPackage : plugin.repositoryUrl}\n\n` +
-          'DSH 插件会在本机 Node.js 进程中运行，能够访问文件、网络和环境变量。仅安装你信任的插件。',
-        buttons: ['安装并重启 DSH', '取消'],
-        defaultId: 1,
-        cancelId: 1,
-        noLink: true
-      })
-      if (result.response !== 0) return { status: 'cancelled' } as const
       if (!pluginService) throw new Error('插件服务尚未就绪')
-      const completed = await pluginService.install(catalogId)
+      return pluginService.prepareInstall(catalogId)
+    })
+    ipcMain.handle(pluginChannels.commitInstall, async (event, preparedId: unknown) => {
+      requireMainSender(event.sender)
+      if (typeof preparedId !== 'string') throw new Error('无效的安装准备记录')
+      if (!pluginService) throw new Error('插件服务尚未就绪')
+      const completed = await pluginService.commitInstall(preparedId)
       updateService.invalidate()
       void updateService.checkInstalled(true).catch((error) => {
         console.warn('插件安装后刷新更新状态失败', error)
       })
       return { status: completed ? 'completed' : 'cancelled' } as const
+    })
+    ipcMain.handle(pluginChannels.cancelInstall, async (event, preparedId: unknown) => {
+      requireMainSender(event.sender)
+      if (typeof preparedId !== 'string') throw new Error('无效的安装准备记录')
+      if (!pluginService) throw new Error('插件服务尚未就绪')
+      await pluginService.cancelPreparedInstall(preparedId)
+      return { status: 'cancelled' } as const
     })
     ipcMain.handle(pluginChannels.remove, async (event, packageName: unknown) => {
       requireMainSender(event.sender)
