@@ -16,7 +16,10 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
     : undefined
 }
 
-function environmentFor(runtime: PnpmRuntime, configPath: string): NodeJS.ProcessEnv {
+export function buildDependencyLockEnvironment(
+  runtime: PnpmRuntime,
+  configPath: string
+): NodeJS.ProcessEnv {
   const environment = commandEnvironment()
   const pathKeys = Object.keys(environment).filter((name) => name.toLowerCase() === 'path')
   const inheritedPath = pathKeys.map((name) => environment[name]).find(Boolean)
@@ -24,7 +27,10 @@ function environmentFor(runtime: PnpmRuntime, configPath: string): NodeJS.Proces
   environment.PATH = [runtime.binDirectory, inheritedPath].filter(Boolean).join(path.delimiter)
   environment.CI = 'true'
   environment.NPM_CONFIG_USERCONFIG = configPath
-  if (runtime.source === 'bundled') environment.DEEPSEEK_HARNESS_DESKTOP_NODE = process.execPath
+  if (runtime.source === 'bundled') {
+    environment.DEEPSEEK_HARNESS_DESKTOP_NODE = process.execPath
+    environment.ELECTRON_RUN_AS_NODE = '1'
+  }
   return environment
 }
 
@@ -50,7 +56,7 @@ async function runPnpm(
   await new Promise<void>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: directory,
-      env: environmentFor(runtime, configPath),
+      env: buildDependencyLockEnvironment(runtime, configPath),
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe']
     })

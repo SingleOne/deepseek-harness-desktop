@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { parsePnpmLockDependencies } from '../src/main/plugin-dependency-lock-service'
+import {
+  buildDependencyLockEnvironment,
+  parsePnpmLockDependencies
+} from '../src/main/plugin-dependency-lock-service'
 
 describe('pnpm dependency lock parsing', () => {
   it('extracts unique registry versions from pnpm 9 lockfiles', () => {
@@ -16,5 +19,19 @@ describe('pnpm dependency lock parsing', () => {
       { name: 'peer-context', version: '3.0.0' },
       { name: 'safe-plugin', version: '1.0.0' }
     ])
+  })
+
+  it('runs bundled pnpm through Electron node mode', () => {
+    const environment = buildDependencyLockEnvironment(
+      {
+        source: 'bundled',
+        version: '11.22.0',
+        binDirectory: 'C:\\app\\resources\\pnpm-bin'
+      },
+      'C:\\temp\\plugin-scan.npmrc'
+    )
+
+    expect(environment.DEEPSEEK_HARNESS_DESKTOP_NODE).toBe(process.execPath)
+    expect(environment.ELECTRON_RUN_AS_NODE).toBe('1')
   })
 })

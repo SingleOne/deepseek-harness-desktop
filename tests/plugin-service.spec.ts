@@ -219,6 +219,7 @@ const updateTarget: PluginUpdateTarget = {
   source: 'github',
   sourceSpec: plugin.installSpec,
   installSpec: plugin.installSpec,
+  catalogId: plugin.id,
   installedVersion: '0.0.2',
   targetVersion: '0.0.3',
   repositoryUrl: plugin.repositoryUrl
@@ -245,6 +246,29 @@ describe('plugin update transaction', () => {
     expect(runtime.stop).toHaveBeenCalledOnce()
     expect(runtime.restart).toHaveBeenCalledOnce()
     expect(service.currentState.phase).toBe('succeeded')
+  })
+
+  it('rescans a catalog update and installs the exact scanned GitHub commit', async () => {
+    const security = securityFixture('pass')
+    security.artifact.installSpec = `github:0xsline/dsh-spotlight#${'b'.repeat(40)}`
+    security.artifact.commit = 'b'.repeat(40)
+    vi.mocked(runDshCommandChecked).mockResolvedValue({ exitCode: 0, stdout: '', stderr: '' })
+    const { runtime, service } = fixture(true, undefined, security.service)
+
+    await expect(service.update(updateTarget)).resolves.toBe(true)
+
+    expect(security.service.prepare).toHaveBeenCalledWith(plugin, expect.any(Function))
+    expect(security.service.verify).toHaveBeenCalledWith(security.artifact)
+    expect(runDshCommandChecked).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      ['plugin', '--profile', 'web', 'add', security.artifact.installSpec],
+      expect.any(String),
+      expect.any(Function),
+      {}
+    )
+    expect(security.service.discard).toHaveBeenCalledWith(security.artifact)
+    expect(runtime.stop).toHaveBeenCalledOnce()
   })
 
   it('restores the snapshot and frozen lockfile when the update command fails', async () => {

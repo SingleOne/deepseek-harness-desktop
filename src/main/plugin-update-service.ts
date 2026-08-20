@@ -63,6 +63,7 @@ export interface PluginUpdateTarget {
   readonly source: 'npm' | 'github'
   readonly sourceSpec: string
   readonly installSpec: string
+  readonly catalogId?: string
   readonly installedVersion: string
   readonly targetVersion: string
   readonly repositoryUrl?: string
@@ -292,14 +293,19 @@ export class PluginUpdateService {
     ) {
       throw new Error(update.error ?? '该插件当前没有可安装的稳定版本更新')
     }
-    const github = update.source === 'github' ? parseGithubSource(plugin.sourceSpec) : null
+    const catalogPlugin = this.catalog.findCatalogPlugin(plugin)
+    const installSpec = catalogPlugin?.source === update.source
+      ? catalogPlugin.installSpec
+      : plugin.sourceSpec
+    const github = update.source === 'github' ? parseGithubSource(installSpec) : null
     return {
       packageName,
       source: update.source,
       sourceSpec: plugin.sourceSpec,
+      catalogId: catalogPlugin?.id,
       installSpec: update.source === 'npm'
         ? `${packageName}@latest`
-        : plugin.sourceSpec,
+        : installSpec,
       installedVersion: update.installedVersion,
       targetVersion: update.latestVersion,
       repositoryUrl: github?.repositoryUrl ?? plugin.repositoryUrl
@@ -398,7 +404,11 @@ export class PluginUpdateService {
 
   private async checkPlugin(plugin: InstalledPlugin): Promise<CheckResult> {
     const checkedAt = new Date().toISOString()
-    const github = parseGithubSource(plugin.sourceSpec)
+    const installedGithub = parseGithubSource(plugin.sourceSpec)
+    const catalogPlugin = installedGithub ? this.catalog.findCatalogPlugin(plugin) : undefined
+    const github = catalogPlugin?.source === 'github'
+      ? parseGithubSource(catalogPlugin.installSpec) ?? installedGithub
+      : installedGithub
     if (github) return this.checkGithubPlugin(plugin, github, checkedAt)
 
     if (exactNpmVersion(plugin.sourceSpec)) {

@@ -19,6 +19,9 @@ import { PluginDependencyLockService } from './plugin-dependency-lock-service'
 import type { PnpmGitBuildApproval } from './pnpm-build-policy'
 import { applicationIcon, createLauncherWindow, createMainWindow, trayIcon } from './windows'
 
+// Electron's process singleton is scoped by userData. Acquire it before switching
+// this instance to its PID-specific temporary runtime directory.
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 const runtimeDataDirectory = path.join(os.tmpdir(), 'deepseek-harness-desktop', String(process.pid))
 const catalogSourceRepositoryUrl = 'https://github.com/awesome-dsh-plugin/awesome-dsh-plugin'
 app.setPath('userData', runtimeDataDirectory)
@@ -26,8 +29,6 @@ app.setPath('sessionData', path.join(runtimeDataDirectory, 'session'))
 app.setAppUserModelId('com.deepseek-harness.desktop')
 
 const debugMode = process.argv.includes('--launcher-debug')
-
-const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
 app.commandLine.appendSwitch('disable-http-cache')
 

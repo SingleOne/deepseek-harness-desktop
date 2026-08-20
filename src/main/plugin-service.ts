@@ -347,6 +347,8 @@ export class PluginService {
     this.busy = true
     let installation: DshInstallation
     let pnpmOptions: DshCommandOptions
+    let installSpec = target.installSpec
+    let preparedArtifact: PreparedSecurityArtifact | undefined
     try {
       const installed = await this.listInstalled()
       const current = installed.find((item) => item.packageName === target.packageName)
@@ -356,8 +358,34 @@ export class PluginService {
       }
       installation = this.requireInstallation()
       pnpmOptions = this.requirePnpm(installation)
+      if (this.security && target.catalogId) {
+        const plugin = await this.catalog.getPlugin(target.catalogId)
+        this.setState({
+          phase: 'resolving-artifact',
+          action: 'update',
+          pluginName: target.packageName,
+          detail: `正在解析 ${target.packageName} 的更新制品`,
+          error: undefined,
+          logs: []
+        })
+        preparedArtifact = await this.security.prepare(plugin, (phase, detail) => {
+          this.setSecurityPhase(phase, detail)
+        })
+        const report = preparedArtifact.report
+        if (report.recommendation === 'block' ||
+            report.findings.some((finding) => finding.severity === 'critical')) {
+          throw new Error('更新制品扫描发现严重危险代码，已阻止更新')
+        }
+        await this.security.verify(preparedArtifact)
+        installSpec = preparedArtifact.installSpec
+      }
     } catch (error) {
+      if (preparedArtifact) {
+        await this.security?.discard(preparedArtifact).catch(() => undefined)
+      }
       this.busy = false
+      const message = errorMessage(error)
+      this.setState({ phase: 'failed', detail: '插件更新准备失败', error: message })
       throw error
     }
 
@@ -375,6 +403,9 @@ export class PluginService {
       snapshot = await this.profile.createSnapshot(target.packageName)
       this.appendLog(`[备份] ${snapshot.backupDirectory}`)
     } catch (error) {
+      if (preparedArtifact) {
+        await this.security?.discard(preparedArtifact).catch(() => undefined)
+      }
       this.busy = false
       const message = errorMessage(error)
       this.setState({ phase: 'failed', detail: '插件更新前备份失败', error: message })
@@ -393,7 +424,7 @@ export class PluginService {
       await this.addPlugin(installation, {
         name: target.packageName,
         source: target.source,
-        installSpec: target.installSpec,
+        installSpec,
         repositoryUrl: target.repositoryUrl
       }, pnpmOptions)
 
@@ -430,6 +461,9 @@ export class PluginService {
     }
 
     const restartError = await this.restartRuntime(target.packageName)
+    if (preparedArtifact) {
+      await this.security?.discard(preparedArtifact).catch(() => undefined)
+    }
     this.busy = false
     if (cancelled && !rollbackError && !restartError) {
       this.setState({ phase: 'idle', detail: `${target.packageName} 更新已取消并恢复` })

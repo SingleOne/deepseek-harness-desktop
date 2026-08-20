@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { InstalledPlugin } from '../src/shared/plugin-market'
-import type { PluginCatalogService } from '../src/main/plugin-catalog-service'
+import type {
+  PluginCatalogService,
+  ResolvedCatalogItem
+} from '../src/main/plugin-catalog-service'
 import type { PluginProfileService } from '../src/main/plugin-profile-service'
 import { PluginUpdateService } from '../src/main/plugin-update-service'
 
@@ -18,13 +21,16 @@ function jsonResponse(value: unknown, status = 200): Response {
   })
 }
 
-function fixture(plugin: InstalledPlugin = githubPlugin) {
+function fixture(
+  plugin: InstalledPlugin = githubPlugin,
+  catalogPlugin?: ResolvedCatalogItem
+) {
   const profile = {
     listInstalled: vi.fn().mockResolvedValue([plugin])
   } as unknown as PluginProfileService
   const catalog = {
     getCatalog: vi.fn().mockResolvedValue({}),
-    findCatalogPlugin: vi.fn()
+    findCatalogPlugin: vi.fn().mockReturnValue(catalogPlugin)
   } as unknown as PluginCatalogService
   return {
     profile,
@@ -94,6 +100,40 @@ describe('plugin update detection', () => {
       expect.objectContaining({ status: 'pinned', source: 'github' })
     ])
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('tracks a scanned GitHub commit through its unpinned catalog source', async () => {
+    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+      name: 'example-plugin',
+      version: '1.3.0',
+      dsh: { bundle: { patch: './cordis.patch.yml' } }
+    }))
+    const catalogPlugin: ResolvedCatalogItem = {
+      id: 'example/example-plugin::github:github:example/example-plugin',
+      name: 'example-plugin',
+      owner: 'example',
+      repositoryUrl: 'https://github.com/example/example-plugin',
+      description: 'test plugin',
+      category: 'tools',
+      stars: 0,
+      source: 'github',
+      installSpec: 'github:example/example-plugin'
+    }
+    const { service } = fixture({
+      ...githubPlugin,
+      sourceSpec: `github:example/example-plugin#${'a'.repeat(40)}`
+    }, catalogPlugin)
+
+    const [update] = await service.checkInstalled(true)
+    const target = await service.resolveUpdate('example-plugin')
+
+    expect(update).toMatchObject({ status: 'available', latestVersion: '1.3.0' })
+    expect(target).toMatchObject({
+      catalogId: catalogPlugin.id,
+      sourceSpec: `github:example/example-plugin#${'a'.repeat(40)}`,
+      installSpec: catalogPlugin.installSpec
+    })
+    expect(vi.mocked(fetch).mock.calls[0][0]).toContain('/HEAD/package.json')
   })
 
   it('treats unknown protocols as unsupported instead of querying npm', async () => {
