@@ -5,7 +5,11 @@ import type { LauncherState } from '../shared/launcher'
 import { launcherChannels } from '../shared/launcher'
 import type { DshRuntimeState, MainSection } from '../shared/plugin-market'
 import { mainChannels } from '../shared/plugin-market'
-import { checkDesktopUpdate } from './desktop-update'
+import {
+  getAvailableDesktopUpdate,
+  openDesktopUpdate as openDesktopUpdateRelease,
+  type DesktopRelease
+} from './desktop-update'
 import {
   getInstalledDsh,
   getLatestDshVersion,
@@ -36,6 +40,8 @@ export class LauncherController {
   private quitting = false
   private dshProcess: ChildProcess | null = null
   private installation: DshInstallation | null = null
+  private availableDshUpdateVersion: string | null = null
+  private availableDesktopUpdate: DesktopRelease | null = null
   private mainWindow: MainWindowHandle | null = null
   private runtimeState: DshRuntimeState = {
     phase: 'stopped',
@@ -44,7 +50,7 @@ export class LauncherController {
   private readonly debugMode: boolean
 
   constructor(
-    private readonly launcherWindow: BrowserWindow,
+    private readonly launcherWindow: BrowserWindow | null,
     private readonly createMainWindow: MainWindowFactory,
     debugMode: boolean,
     private readonly notificationBridgeEnvironment?: NotificationBridgeEnvironment
@@ -103,11 +109,21 @@ export class LauncherController {
       this.setState({ logs: [] })
       this.appendLog('[流程] 开始新的启动流程')
       await this.stopCurrentDsh()
-      await this.runDesktopUpdateCheck()
-      const installation = await this.prepareDsh()
+      this.availableDshUpdateVersion = null
+      this.availableDesktopUpdate = null
+      this.ensureMainWindow()
+      this.setRuntimeState({
+        phase: 'starting',
+        detail: '正在定位已安装的 DSH'
+      })
+
+      const latestVersionPromise = this.checkLatestDshVersion()
+      void this.runDesktopUpdateCheck()
+
+      const installation = await this.resolveDshInstallation(latestVersionPromise)
       if (!installation) return
       this.installation = installation
-      this.ensureMainWindow()
+      void this.publishAvailableDshUpdate(installation, latestVersionPromise)
       await this.launchDsh(installation)
     } catch (error) {
       await this.stopCurrentDsh()
@@ -157,8 +173,41 @@ export class LauncherController {
     }
   }
 
-  sendState(window = this.launcherWindow): void {
-    if (window.isDestroyed() || window.webContents.isDestroyed()) return
+  async updateDshAndRestart(): Promise<void> {
+    const version = this.availableDshUpdateVersion
+    if (!version || !this.installation) throw new Error('当前没有可用的 DSH 更新')
+    if (this.running || this.restartingRuntime) throw new Error('DSH 正在启动或重新启动')
+
+    this.restartingRuntime = true
+    this.availableDshUpdateVersion = null
+    try {
+      await this.stopDshForPluginOperation(`正在更新 DSH 至 ${version}`)
+      const installation = await this.installDsh(version, 'updating-dsh')
+      this.installation = installation
+      await this.launchDsh(installation)
+    } catch (error) {
+      this.availableDshUpdateVersion = version
+      const message = this.errorMessage(error)
+      this.setRuntimeState({
+        phase: 'error',
+        detail: `DSH 更新失败：${message}`,
+        version: this.installation?.version
+      })
+      throw error
+    } finally {
+      this.restartingRuntime = false
+    }
+  }
+
+  async openDesktopUpdate(): Promise<void> {
+    const release = this.availableDesktopUpdate
+    if (!release) throw new Error('当前没有可用的 dsh-desktop 更新')
+    this.appendLog(`[应用更新] 前往下载 dsh-desktop ${release.version}`)
+    await openDesktopUpdateRelease(release)
+  }
+
+  sendState(window = this.launcherWindow ?? undefined): void {
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return
     try {
       window.webContents.send(launcherChannels.state, this.state)
     } catch (error) {
@@ -176,53 +225,36 @@ export class LauncherController {
   }
 
   private async runDesktopUpdateCheck(): Promise<void> {
-    this.setState({
-      phase: 'checking-desktop-update',
-      title: '检查应用更新',
-      detail: '正在检查 dsh-desktop 更新'
-    })
-
     try {
-      await checkDesktopUpdate(this.launcherWindow, (line) => this.appendLog(line))
+      const release = await getAvailableDesktopUpdate((line) => this.appendLog(line))
+      if (!release) return
+      this.availableDesktopUpdate = release
+      this.setRuntimeState(this.runtimeState)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.appendLog(`dsh-desktop 更新检查失败：${message}`, 'error')
     }
   }
 
-  private async prepareDsh(): Promise<DshInstallation | null> {
+  private async resolveDshInstallation(
+    latestVersionPromise: Promise<string | undefined>
+  ): Promise<DshInstallation | null> {
     this.setState({
       phase: 'checking-dsh',
       title: '检查 DSH',
-      detail: '正在读取已安装版本并检查 npm 最新版本'
+      detail: '正在读取已安装版本'
     })
-    this.appendLog('[步骤] 并行检查本机 DSH 和 npm latest')
+    this.appendLog('[步骤] 读取本机 DSH；更新检查已在后台开始')
 
-    const [installedResult, latestResult] = await Promise.allSettled([
-      getInstalledDsh((line) => this.appendDetailedLog(line)),
-      getLatestDshVersion((line) => this.appendDetailedLog(line))
-    ])
-
-    if (installedResult.status === 'rejected') {
-      throw new Error(`无法读取 DSH 安装信息：${this.errorMessage(installedResult.reason)}`)
-    }
-
-    let installation = installedResult.value
-    const latestVersion = latestResult.status === 'fulfilled' ? latestResult.value : undefined
-
-    if (latestResult.status === 'rejected') {
-      this.appendLog(`DSH 更新检查失败：${this.errorMessage(latestResult.reason)}`, 'error')
-    }
+    let installation = await getInstalledDsh((line) => this.appendDetailedLog(line))
 
     this.setState({
-      installedDshVersion: installation?.version,
-      latestDshVersion: latestVersion
+      installedDshVersion: installation?.version
     })
-    this.appendLog(
-      `[结果] 本机版本：${installation?.version ?? '未安装'}；npm latest：${latestVersion ?? '获取失败'}`
-    )
+    this.appendLog(`[结果] 本机版本：${installation?.version ?? '未安装'}`)
 
     if (!installation) {
+      const latestVersion = await latestVersionPromise
       if (!latestVersion) {
         throw new Error('未安装 DSH，且无法从 npm 获取可安装版本')
       }
@@ -232,15 +264,34 @@ export class LauncherController {
       return installation
     }
 
-    if (latestVersion && this.isNewerVersion(latestVersion, installation.version)) {
-      const choice = await this.askToUpdateDsh(installation.version, latestVersion)
-      if (choice === 'cancel') return null
-      if (choice === 'update') {
-        installation = await this.installDsh(latestVersion, 'updating-dsh')
-      }
-    }
-
     return installation
+  }
+
+  private async checkLatestDshVersion(): Promise<string | undefined> {
+    try {
+      const latestVersion = await getLatestDshVersion((line) => this.appendDetailedLog(line))
+      this.setState({ latestDshVersion: latestVersion })
+      return latestVersion
+    } catch (error) {
+      this.appendLog(`DSH 更新检查失败：${this.errorMessage(error)}`, 'error')
+      return undefined
+    }
+  }
+
+  private async publishAvailableDshUpdate(
+    installation: DshInstallation,
+    latestVersionPromise: Promise<string | undefined>
+  ): Promise<void> {
+    const latestVersion = await latestVersionPromise
+    if (
+      !latestVersion
+      || this.installation?.version !== installation.version
+      || !this.isNewerVersion(latestVersion, installation.version)
+    ) return
+
+    this.availableDshUpdateVersion = latestVersion
+    this.appendLog(`[结果] DSH 可更新：${installation.version} → ${latestVersion}`)
+    this.setRuntimeState(this.runtimeState)
   }
 
   private async installDsh(
@@ -326,7 +377,7 @@ export class LauncherController {
   }
 
   private async askToInstallDsh(version: string): Promise<boolean> {
-    const result = await dialog.showMessageBox(this.launcherWindow, {
+    const result = await dialog.showMessageBox(this.dialogWindow(), {
       type: 'question',
       title: '安装 DSH',
       message: '未检测到已安装的 DSH',
@@ -339,29 +390,6 @@ export class LauncherController {
     if (this.quitting) return false
     if (result.response === 1) app.quit()
     return result.response === 0
-  }
-
-  private async askToUpdateDsh(
-    installedVersion: string,
-    latestVersion: string
-  ): Promise<'update' | 'current' | 'cancel'> {
-    const result = await dialog.showMessageBox(this.launcherWindow, {
-      type: 'question',
-      title: 'DSH 更新',
-      message: 'DSH 有可用更新',
-      detail: `当前版本：${installedVersion}\n最新版本：${latestVersion}`,
-      buttons: ['更新并启动', '继续使用当前版本', '取消启动'],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true
-    })
-
-    if (this.quitting) return 'cancel'
-
-    if (result.response === 0) return 'update'
-    if (result.response === 1) return 'current'
-    app.quit()
-    return 'cancel'
   }
 
   private isNewerVersion(latestVersion: string, installedVersion: string): boolean {
@@ -419,7 +447,7 @@ export class LauncherController {
       if (mainWindow.isDestroyed()) return
       mainWindow.show()
       mainWindow.focus()
-      if (!this.launcherWindow.isDestroyed()) this.launcherWindow.destroy()
+      if (this.launcherWindow && !this.launcherWindow.isDestroyed()) this.launcherWindow.destroy()
     }
 
     if (mainWindow.isVisible()) show()
@@ -427,7 +455,15 @@ export class LauncherController {
   }
 
   private setRuntimeState(state: DshRuntimeState): void {
-    this.runtimeState = state
+    this.runtimeState = {
+      ...state,
+      availableDshUpdateVersion: this.availableDshUpdateVersion ?? undefined,
+      availableDesktopUpdateVersion: this.availableDesktopUpdate?.version
+    }
     this.sendRuntimeState()
+  }
+
+  private dialogWindow(): BrowserWindow {
+    return this.mainBrowserWindow ?? this.launcherWindow ?? this.ensureMainWindow().window
   }
 }

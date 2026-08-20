@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-desktop",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "A minimal desktop launcher for the official DeepSeek Harness Web UI.",
   "type": "module",
   "main": "./out/main/index.js",

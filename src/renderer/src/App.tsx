@@ -6,20 +6,20 @@ const initialState: LauncherState = {
   phase: 'idle',
   title: '准备启动',
   detail: '正在连接启动服务',
-  appVersion: '0.3.1',
+  appVersion: '0.3.3',
   logs: []
 }
 
 const browserPreviewState: LauncherState = {
   phase: 'checking-dsh',
   title: '检查 DSH',
-  detail: '正在读取已安装版本并检查 npm 最新版本',
-  appVersion: '0.3.1',
+  detail: '正在读取已安装版本，更新检查已在后台进行',
+  appVersion: '0.3.3',
   installedDshVersion: '0.1.0-rc.5',
   latestDshVersion: '0.1.0-rc.6',
   logs: [
     '[流程] 开始新的启动流程',
-    '[步骤] 并行检查本机 DSH 和 npm latest',
+    '[步骤] 读取本机 DSH；更新检查已在后台开始',
     '$ npm root --global',
     '[stdout] C:\\Users\\demo\\AppData\\Local\\...\\node_modules',
     '$ npm view @deepseek-ai/dsh dist-tags.latest --json',

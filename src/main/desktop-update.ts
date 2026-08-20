@@ -8,14 +8,16 @@ import {
 } from 'electron'
 import semver from 'semver'
 
-interface DesktopRelease {
+export interface DesktopRelease {
   version: string
   downloadUrl: string
 }
 
 type OutputLine = (line: string) => void
 
-async function fetchLatestDesktopRelease(onLine?: OutputLine): Promise<DesktopRelease | null> {
+export async function getAvailableDesktopUpdate(
+  onLine?: OutputLine
+): Promise<DesktopRelease | null> {
   onLine?.(`[应用更新] HEAD ${__DESKTOP_UPDATE_RELEASE_URL__}`)
 
   const response = await fetch(__DESKTOP_UPDATE_RELEASE_URL__, {
@@ -61,7 +63,7 @@ export async function checkDesktopUpdate(
   onLine?: OutputLine,
   notifyIfNoUpdate = false
 ): Promise<void> {
-  const release = await fetchLatestDesktopRelease(onLine)
+  const release = await getAvailableDesktopUpdate(onLine)
   if (!release) {
     if (notifyIfNoUpdate) {
       await showUpdateMessage(window, {
@@ -93,6 +95,10 @@ export async function checkDesktopUpdate(
   } else {
     onLine?.('[应用更新] 用户选择暂不更新')
   }
+}
+
+export async function openDesktopUpdate(release: DesktopRelease): Promise<void> {
+  await shell.openExternal(release.downloadUrl)
 }
 
 export async function checkDesktopUpdateManually(): Promise<void> {

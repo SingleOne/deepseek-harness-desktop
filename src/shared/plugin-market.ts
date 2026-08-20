@@ -8,6 +8,8 @@ export interface DshRuntimeState {
   phase: DshRuntimePhase
   detail: string
   version?: string
+  availableDshUpdateVersion?: string
+  availableDesktopUpdateVersion?: string
 }
 
 export interface PluginCategory {
@@ -112,6 +114,8 @@ export interface DesktopMainApi {
   subscribeSection(listener: (section: MainSection) => void): () => void
   subscribeRuntime(listener: (state: DshRuntimeState) => void): () => void
   restartDsh(): Promise<void>
+  updateDsh(): Promise<void>
+  openDesktopUpdate(): Promise<void>
   getCatalog(refresh?: boolean): Promise<PluginCatalogSnapshot>
   getInstalled(): Promise<InstalledPlugin[]>
   getUpdateSummary(): Promise<PluginUpdateSummary>
@@ -130,6 +134,8 @@ export const mainChannels = {
   section: 'main:section',
   navigate: 'main:navigate',
   restart: 'main:restart',
+  updateDsh: 'main:update-dsh',
+  openDesktopUpdate: 'main:open-desktop-update',
   runtimeState: 'main:runtime-state',
   requestRuntimeState: 'main:runtime-state:request'
 } as const

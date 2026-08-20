@@ -153,13 +153,16 @@ if (!hasSingleInstanceLock) {
       console.warn('桌面通知桥接启动失败，DSH 插件将使用原生通知')
     }
 
-    const launcherWindow = createLauncherWindow()
-    lastActiveWindow = launcherWindow
-    minimizeToTrayOnClose(launcherWindow)
+    const launcherWindow = debugMode ? createLauncherWindow() : null
+    if (launcherWindow) {
+      lastActiveWindow = launcherWindow
+      minimizeToTrayOnClose(launcherWindow)
+    }
     controller = new LauncherController(
       launcherWindow,
       () => {
         const mainWindow = createMainWindow()
+        lastActiveWindow = mainWindow.window
         minimizeToTrayOnClose(mainWindow.window)
         return mainWindow
       },
@@ -253,6 +256,14 @@ if (!hasSingleInstanceLock) {
       requireMainSender(event.sender)
       await controller?.stopDshForPluginOperation('正在重新启动 DSH')
       await controller?.restartDshAfterPluginOperation()
+    })
+    ipcMain.handle(mainChannels.updateDsh, async (event) => {
+      requireMainSender(event.sender)
+      await controller?.updateDshAndRestart()
+    })
+    ipcMain.handle(mainChannels.openDesktopUpdate, async (event) => {
+      requireMainSender(event.sender)
+      await controller?.openDesktopUpdate()
     })
     ipcMain.on(pluginChannels.requestOperationState, (event) => {
       if (!isMainSender(event.sender)) return

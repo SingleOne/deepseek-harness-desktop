@@ -825,10 +825,51 @@ export function MainApp() {
     }
   }
 
+  const updateDsh = async (): Promise<void> => {
+    if (!api) return
+    setActionError(undefined)
+    try {
+      await api.updateDsh()
+    } catch (error) {
+      setActionError(messageOf(error))
+    }
+  }
+
+  const openDesktopUpdate = async (): Promise<void> => {
+    if (!api) return
+    setActionError(undefined)
+    try {
+      await api.openDesktopUpdate()
+    } catch (error) {
+      setActionError(messageOf(error))
+    }
+  }
+
   return (
     <main className="main-shell">
       <header className="main-titlebar">
         <span className="product-name">dsh-desktop</span>
+        {runtime.availableDshUpdateVersion ? (
+          <button
+            className="titlebar-update-button titlebar-update-button--dsh"
+            title={`DSH ${runtime.version ?? ''} → ${runtime.availableDshUpdateVersion}`}
+            disabled={runtime.phase !== 'ready'}
+            onClick={() => void updateDsh()}
+          >
+            <RefreshCw aria-hidden="true" />
+            DSH 有更新，重启更新
+          </button>
+        ) : null}
+        {runtime.availableDesktopUpdateVersion ? (
+          <button
+            className="titlebar-update-button titlebar-update-button--desktop"
+            title={`dsh-desktop 最新版本 ${runtime.availableDesktopUpdateVersion}`}
+            onClick={() => void openDesktopUpdate()}
+          >
+            <ExternalLink aria-hidden="true" />
+            dsh-desktop 有更新，前往更新
+          </button>
+        ) : null}
       </header>
 
       <aside className="main-sidebar">

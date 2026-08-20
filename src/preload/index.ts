@@ -47,6 +47,12 @@ const mainApi: DesktopMainApi = {
   restartDsh() {
     return ipcRenderer.invoke(mainChannels.restart)
   },
+  updateDsh() {
+    return ipcRenderer.invoke(mainChannels.updateDsh)
+  },
+  openDesktopUpdate() {
+    return ipcRenderer.invoke(mainChannels.openDesktopUpdate)
+  },
   getCatalog(refresh = false) {
     return ipcRenderer.invoke(pluginChannels.catalog, refresh)
   },
