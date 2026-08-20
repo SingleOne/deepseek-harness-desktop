@@ -160,7 +160,7 @@ export class PluginService {
     if (report.recommendation === 'block' ||
         report.findings.some((finding) => finding.severity === 'critical')) {
       await this.cancelPreparedInstall(preparedId)
-      throw new Error('扫描发现严重危险代码，已阻止安装')
+      throw new Error('扫描发现重大漏洞或恶意代码，已阻止安装')
     }
     let installation: DshInstallation
     let pnpmOptions: DshCommandOptions
@@ -374,7 +374,7 @@ export class PluginService {
         const report = preparedArtifact.report
         if (report.recommendation === 'block' ||
             report.findings.some((finding) => finding.severity === 'critical')) {
-          throw new Error('更新制品扫描发现严重危险代码，已阻止更新')
+          throw new Error('更新制品扫描发现重大漏洞或恶意代码，已阻止更新')
         }
         await this.security.verify(preparedArtifact)
         installSpec = preparedArtifact.installSpec

@@ -40,7 +40,6 @@ function stringValue(value: unknown): string | undefined {
 function reportRecommendation(report: ScanReport): ScanReport['recommendation'] {
   if (report.findings.some((finding) => finding.severity === 'critical')) return 'block'
   if (!report.coverage.complete) return 'incomplete'
-  if (report.findings.some((finding) => ['medium', 'high'].includes(finding.severity))) return 'review'
   return 'pass'
 }
 
@@ -67,6 +66,68 @@ function vulnerabilityTitle(value: unknown, id: string): string {
   return stringValue(objectValue(value)?.summary) ?? `依赖命中已知漏洞 ${id}`
 }
 
+function cvssV3BaseScore(vector: string): number | undefined {
+  if (!/^CVSS:3\.[01]\//.test(vector)) return undefined
+  const metrics = new Map(
+    vector.split('/').slice(1).flatMap((part) => {
+      const [name, value] = part.split(':')
+      return name && value ? [[name, value] as const] : []
+    })
+  )
+  const scope = metrics.get('S')
+  const attackVector = { N: 0.85, A: 0.62, L: 0.55, P: 0.2 }[metrics.get('AV') ?? '']
+  const attackComplexity = { L: 0.77, H: 0.44 }[metrics.get('AC') ?? '']
+  const userInteraction = { N: 0.85, R: 0.62 }[metrics.get('UI') ?? '']
+  const privilegesRequired = (scope === 'C'
+    ? { N: 0.85, L: 0.68, H: 0.5 }
+    : { N: 0.85, L: 0.62, H: 0.27 })[metrics.get('PR') ?? '']
+  const impactValue = (name: 'C' | 'I' | 'A'): number | undefined =>
+    ({ H: 0.56, L: 0.22, N: 0 })[metrics.get(name) ?? '']
+  const confidentiality = impactValue('C')
+  const integrity = impactValue('I')
+  const availability = impactValue('A')
+  if (
+    !scope || attackVector === undefined || attackComplexity === undefined ||
+    privilegesRequired === undefined || userInteraction === undefined ||
+    confidentiality === undefined || integrity === undefined || availability === undefined
+  ) return undefined
+
+  const impactBase = 1 - (1 - confidentiality) * (1 - integrity) * (1 - availability)
+  const impact = scope === 'C'
+    ? 7.52 * (impactBase - 0.029) - 3.25 * Math.pow(impactBase - 0.02, 15)
+    : 6.42 * impactBase
+  if (impact <= 0) return 0
+  const exploitability = 8.22 * attackVector * attackComplexity * privilegesRequired * userInteraction
+  const score = scope === 'C'
+    ? Math.min(1.08 * (impact + exploitability), 10)
+    : Math.min(impact + exploitability, 10)
+  return Math.ceil(score * 10) / 10
+}
+
+function isMajorVulnerability(value: unknown): boolean {
+  const root = objectValue(value)
+  if (!root) return false
+  const affected = Array.isArray(root.affected) ? root.affected.map(objectValue).filter(Boolean) : []
+  const records = [root, ...affected]
+  for (const record of records) {
+    for (const key of ['database_specific', 'ecosystem_specific']) {
+      const metadata = objectValue(record?.[key])
+      const severity = stringValue(metadata?.severity)?.toUpperCase()
+      if (severity === 'HIGH' || severity === 'CRITICAL') return true
+      const cvss = objectValue(metadata?.cvss)
+      const score = Number(cvss?.score ?? metadata?.cvss_score ?? metadata?.cvssScore)
+      if (Number.isFinite(score) && score >= 7) return true
+    }
+    for (const severityItem of Array.isArray(record?.severity) ? record.severity : []) {
+      const rawScore = stringValue(objectValue(severityItem)?.score)
+      const numericScore = Number(rawScore)
+      const score = Number.isFinite(numericScore) ? numericScore : rawScore ? cvssV3BaseScore(rawScore) : undefined
+      if (score !== undefined && score >= 7) return true
+    }
+  }
+  return false
+}
+
 export class PluginSecurityAdvisoryService {
   constructor(
     private readonly fetchImpl: FetchImplementation = fetch,
@@ -77,7 +138,7 @@ export class PluginSecurityAdvisoryService {
   async enrich(input: SecurityAdvisoryInput): Promise<ScanReport> {
     const report: ScanReport = {
       ...input.report,
-      findings: [...input.report.findings],
+      findings: input.report.findings.filter((finding) => finding.severity === 'critical'),
       supplyChain: {
         osv: { status: 'not-run', queriedPackages: 0, vulnerabilityCount: 0 },
         registrySignature: { status: 'not-applicable' },
@@ -135,16 +196,6 @@ export class PluginSecurityAdvisoryService {
       publishedAt: metadata.publishedAt,
       ageHours
     }
-    if (status === 'too-new') {
-      report.findings.push(finding(
-        'supply-chain.release-too-new',
-        'high',
-        'supply-chain',
-        `版本发布不足 ${this.minimumReleaseAgeHours} 小时`,
-        '新发布版本尚未经过足够的社区观察窗口，需要人工确认。',
-        `${metadata.name}@${metadata.version} · ${ageHours.toFixed(1)} 小时`
-      ))
-    }
   }
 
   private async verifyRegistrySignature(metadata: NpmSupplyChainMetadata): Promise<{
@@ -153,14 +204,7 @@ export class PluginSecurityAdvisoryService {
   }> {
     if (metadata.signatures.length === 0) {
       return {
-        signal: { status: 'missing' },
-        finding: finding(
-          'supply-chain.registry-signature-missing',
-          'medium',
-          'supply-chain',
-          'npm 制品没有 registry 签名',
-          'SHA-512 完整性已校验，但 registry 元数据没有提供可验证签名。'
-        )
+        signal: { status: 'missing' }
       }
     }
     try {
@@ -191,14 +235,7 @@ export class PluginSecurityAdvisoryService {
       }
       if (!matchedKey) {
         return {
-          signal: { status: 'unavailable' },
-          finding: finding(
-            'supply-chain.registry-signature-key-unavailable',
-            'medium',
-            'supply-chain',
-            'npm registry 签名密钥不可用',
-            '制品声明的签名密钥不在 registry 当前公钥集合中，需要人工确认。'
-          )
+          signal: { status: 'unavailable' }
         }
       }
       return {
@@ -213,15 +250,7 @@ export class PluginSecurityAdvisoryService {
       }
     } catch (error) {
       return {
-        signal: { status: 'unavailable' },
-        finding: finding(
-          'supply-chain.registry-signature-unavailable',
-          'medium',
-          'supply-chain',
-          '暂时无法验证 npm registry 签名',
-          '公钥服务不可用，需要人工确认后才能继续。',
-          error instanceof Error ? error.message : String(error)
-        )
+        signal: { status: 'unavailable' }
       }
     }
   }
@@ -286,8 +315,7 @@ export class PluginSecurityAdvisoryService {
           matches.set(id, labels)
         }
       })
-      const allIds = [...matches.keys()]
-      const ids = allIds.slice(0, maxVulnerabilityDetails)
+      const ids = [...matches.keys()].slice(0, maxVulnerabilityDetails)
       const details = await Promise.all(ids.map(async (id) => {
         try {
           const detailResponse = await this.fetchImpl(`https://api.osv.dev/v1/vulns/${encodeURIComponent(id)}`, {
@@ -299,32 +327,28 @@ export class PluginSecurityAdvisoryService {
           return undefined
         }
       }))
+      const majorMatches = ids.flatMap((id, index) =>
+        isMajorVulnerability(details[index]) ? [{ id, detail: details[index] }] : []
+      )
       return {
         signal: {
           status: 'complete',
           queriedPackages: queries.length,
-          vulnerabilityCount: allIds.length
+          vulnerabilityCount: majorMatches.length
         },
-        findings: ids.map((id, index) => finding(
+        findings: majorMatches.map(({ id, detail }) => finding(
           `osv.${id}`,
-          'high',
+          'critical',
           'dependency',
-          vulnerabilityTitle(details[index], id),
-          '插件本体或制品清单中的精确版本依赖命中 OSV 已知漏洞，需要人工审查。',
+          vulnerabilityTitle(detail, id),
+          '插件本体或锁定依赖命中 OSV 标记为高危或严重的已知漏洞，安装已阻止。',
           `${id} · ${[...(matches.get(id) ?? [])].join(', ')}`
         ))
       }
     } catch (error) {
       return {
         signal: { status: 'unavailable', queriedPackages: queries.length, vulnerabilityCount: 0 },
-        findings: [finding(
-          'supply-chain.osv-unavailable',
-          'medium',
-          'supply-chain',
-          'OSV 漏洞情报暂时不可用',
-          '静态扫描已完成，但在线漏洞数据未能覆盖本次安装。',
-          error instanceof Error ? error.message : String(error)
-        )]
+        findings: []
       }
     }
   }

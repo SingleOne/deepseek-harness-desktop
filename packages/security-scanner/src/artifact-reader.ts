@@ -98,11 +98,6 @@ export async function readArtifact(
   if (archive.byteLength > limits.maxArchiveBytes) {
     coverage.complete = false
     coverage.notes.push(`压缩包超过 ${limits.maxArchiveBytes} 字节上限`)
-    findings.push(archiveFinding(
-      'archive.size-limit',
-      '压缩包超过扫描上限',
-      '扫描器没有完整读取该制品。'
-    ))
     return { entries: [], coverage, findings }
   }
 
@@ -140,14 +135,14 @@ export async function readArtifact(
 
     if (header.type === 'symlink' || header.type === 'link') {
       const linkTarget = normalizedArchivePath(header.linkname ?? '')
-      findings.push(archiveFinding(
-        'archive.link-entry',
-        '归档包含链接条目',
-        linkTarget
-          ? '扫描器不会跟随归档中的符号链接或硬链接。'
-          : '归档链接指向包边界之外。',
-        entryPath
-      ))
+      if (!linkTarget) {
+        findings.push(archiveFinding(
+          'archive.link-entry',
+          '归档链接逃逸插件目录',
+          '符号链接或硬链接指向包边界之外。',
+          entryPath
+        ))
+      }
       stream.resume()
       stream.once('end', next)
       return

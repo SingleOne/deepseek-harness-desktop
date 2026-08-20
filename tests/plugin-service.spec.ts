@@ -86,8 +86,8 @@ function securityFixture(recommendation: ScanReport['recommendation']) {
     schemaVersion: 1,
     engine: {
       id: '@dsh-desktop/security-scanner',
-      version: '0.1.0',
-      rulePacks: [{ id: '@dsh-desktop/rules-dsh', version: '0.1.0' }]
+      version: '0.4.0',
+      rulePacks: [{ id: '@dsh-desktop/rules-dsh', version: '0.2.0' }]
     },
     artifact: { source: 'github', digest: 'a'.repeat(128) },
     recommendation,
@@ -347,7 +347,7 @@ describe('plugin security preparation', () => {
 
     const prepared = await service.prepareInstall(plugin.id)
 
-    await expect(service.commitInstall(prepared.id)).rejects.toThrow('严重危险代码')
+    await expect(service.commitInstall(prepared.id)).rejects.toThrow('重大漏洞或恶意代码')
     expect(runtime.stop).not.toHaveBeenCalled()
     expect(runDshCommandChecked).not.toHaveBeenCalled()
     expect(security.service.discard).toHaveBeenCalledOnce()

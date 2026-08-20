@@ -181,54 +181,6 @@ function groupSecurityFindings(findings: SecurityFinding[]): GroupedSecurityFind
   return [...groups.values()]
 }
 
-function supplyChainStatus(report: PreparedPluginInstall['report']): Array<{
-  label: string
-  value: string
-  tone: 'ok' | 'warn' | 'danger' | 'neutral'
-}> {
-  const { supplyChain } = report
-  const signature = supplyChain.registrySignature.status
-  const release = supplyChain.releaseAge
-  return [
-    {
-      label: 'OSV 漏洞情报',
-      value: supplyChain.osv.status === 'complete'
-        ? `${supplyChain.osv.queriedPackages} 个版本 · ${supplyChain.osv.vulnerabilityCount} 个命中`
-        : supplyChain.osv.status === 'unavailable' ? '暂时不可用' : '未运行',
-      tone: supplyChain.osv.status === 'complete'
-        ? (supplyChain.osv.vulnerabilityCount > 0 ? 'warn' : 'ok')
-        : 'warn'
-    },
-    {
-      label: 'npm Registry 签名',
-      value: signature === 'verified' ? '验证通过'
-        : signature === 'not-applicable' ? '不适用'
-          : signature === 'missing' ? '未提供'
-            : signature === 'invalid' ? '验证失败'
-              : '暂时不可用',
-      tone: signature === 'verified' ? 'ok'
-        : signature === 'invalid' ? 'danger'
-          : signature === 'not-applicable' ? 'neutral' : 'warn'
-    },
-    {
-      label: '发布来源证明',
-      value: supplyChain.provenance.status === 'present-unverified' ? '已声明，未验证证明链'
-        : supplyChain.provenance.status === 'absent' ? '未提供'
-          : '不适用',
-      tone: supplyChain.provenance.status === 'present-unverified' ? 'warn' : 'neutral'
-    },
-    {
-      label: '版本观察期',
-      value: release.status === 'mature' ? `${Math.floor(release.ageHours ?? 0)} 小时`
-        : release.status === 'too-new' ? `${(release.ageHours ?? 0).toFixed(1)} 小时，不足 ${release.minimumHours} 小时`
-          : release.status === 'unknown' ? '发布时间未知'
-            : '不适用',
-      tone: release.status === 'mature' ? 'ok'
-        : release.status === 'too-new' ? 'warn' : 'neutral'
-    }
-  ]
-}
-
 interface SecurityReviewDialogProps {
   preparation: PreparedPluginInstall
   status: SecurityInstallStatus
@@ -273,7 +225,7 @@ function SecurityScanProgressDialog({
           <div>
             <p className="eyebrow">PLUGIN SECURITY</p>
             <h2 id="security-scan-progress-title">{pluginName}</h2>
-            <p>{failed ? '扫描未完成' : '正在执行安装前安全扫描'}</p>
+            <p>{failed ? '扫描未完成' : '正在扫描重大漏洞与恶意代码'}</p>
           </div>
           <span className={`security-verdict security-verdict--${failed ? 'incomplete' : 'scanning'}`}>
             {failed ? '扫描失败' : '扫描中'}
@@ -292,11 +244,11 @@ function SecurityScanProgressDialog({
 
         <div className="security-review-body security-scan-progress">
           {failed ? <ShieldAlert aria-hidden="true" /> : <LoaderCircle className="spin" aria-hidden="true" />}
-          <h3>{detail ?? '正在准备插件安全扫描'}</h3>
+          <h3>{detail ?? '正在扫描重大漏洞与恶意代码'}</h3>
           <p>
             {failed
               ? error ?? '安全扫描执行失败。'
-              : '扫描完成后，未发现阻断级风险的插件将自动继续安装。'}
+              : '未发现重大漏洞或恶意代码时，插件将自动继续安装。'}
           </p>
         </div>
 
@@ -327,7 +279,6 @@ function SecurityReviewDialog({
   const { report } = preparation
   const submitting = status === 'installing' || status === 'closing'
   const identity = report.artifact
-  const supplyChain = supplyChainStatus(report)
   const findingGroups = groupSecurityFindings(report.findings)
   const headerStatus: { label: string; tone: 'pass' | 'block' | 'incomplete' | 'scanning' } =
     status === 'installing' ? { label: '自动安装中', tone: 'scanning' }
@@ -424,21 +375,6 @@ function SecurityReviewDialog({
             </div>
           </dl>
 
-          <section className="security-supply-chain" aria-label="供应链信号">
-            <div className="security-section-heading">
-              <h3>供应链信号</h3>
-              <span>在线核验</span>
-            </div>
-            <div className="security-signal-grid">
-              {supplyChain.map((signal) => (
-                <div className={`security-signal security-signal--${signal.tone}`} key={signal.label}>
-                  <span>{signal.label}</span>
-                  <strong>{signal.value}</strong>
-                </div>
-              ))}
-            </div>
-          </section>
-
           {report.coverage.notes.length > 0 && (
             <div className="security-coverage-notes">
               <FileWarning aria-hidden="true" />
@@ -453,13 +389,13 @@ function SecurityReviewDialog({
 
           <section className="security-findings" aria-label="扫描发现">
             <div className="security-section-heading">
-              <h3>扫描发现</h3>
+              <h3>重大漏洞与恶意代码</h3>
               <span>{findingGroups.length} 类 · {report.findings.length} 处</span>
             </div>
             {report.findings.length === 0 ? (
               <div className="security-empty-findings">
                 <CheckCircle2 aria-hidden="true" />
-                <p>未发现需要人工确认或阻止安装的风险项。</p>
+                <p>未发现重大漏洞或明确的恶意代码。</p>
               </div>
             ) : (
               <div className="security-finding-list">
@@ -502,11 +438,11 @@ function SecurityReviewDialog({
         <footer className="security-review-footer">
           <p>
             {status === 'blocked'
-              ? '扫描发现严重危险代码，Desktop 已阻止安装。'
+              ? '扫描发现重大漏洞或恶意代码，Desktop 已阻止安装。'
               : status === 'installing'
-                ? '未发现阻断级风险，正在自动安装。'
+                ? '未发现重大漏洞或恶意代码，正在自动安装。'
                 : status === 'installed'
-                  ? '未发现阻断级风险，插件已自动安装完成。'
+                  ? '未发现重大漏洞或恶意代码，插件已自动安装完成。'
                   : status === 'cancelled'
                     ? '自动安装已取消。'
                     : status === 'closing'

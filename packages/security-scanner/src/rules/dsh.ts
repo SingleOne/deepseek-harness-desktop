@@ -22,7 +22,7 @@ function finding(
 
 export const dshRulePack: RulePack = {
   id: '@dsh-desktop/rules-dsh',
-  version: '0.1.0',
+  version: '0.2.0',
   scan(context) {
     for (const entry of context.entries) {
       if (!entry.text) continue
@@ -52,16 +52,6 @@ export const dshRulePack: RulePack = {
           'critical',
           'DSH patch 引用了包外路径',
           '配置 patch 中的 include、extends 或 path 可能逃逸插件目录。',
-          entry.path
-        ))
-      }
-      if (/\.(?:html?|tsx?|jsx?|vue|svelte)$/i.test(name) &&
-          /<script[^>]+src\s*=\s*["']https?:\/\/|<(?:iframe|webview)\b/i.test(entry.text)) {
-        context.addFinding(finding(
-          'dsh.client.remote-content',
-          'high',
-          '客户端代码加载远程内容',
-          '插件 UI 包含远程脚本、iframe 或 WebView，需要人工确认来源和权限。',
           entry.path
         ))
       }

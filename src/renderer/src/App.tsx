@@ -6,7 +6,7 @@ const initialState: LauncherState = {
   phase: 'idle',
   title: '准备启动',
   detail: '正在连接启动服务',
-  appVersion: '0.3.3',
+  appVersion: '0.3.4',
   logs: []
 }
 
@@ -14,7 +14,7 @@ const browserPreviewState: LauncherState = {
   phase: 'checking-dsh',
   title: '检查 DSH',
   detail: '正在读取已安装版本，更新检查已在后台进行',
-  appVersion: '0.3.3',
+  appVersion: '0.3.4',
   installedDshVersion: '0.1.0-rc.5',
   latestDshVersion: '0.1.0-rc.6',
   logs: [

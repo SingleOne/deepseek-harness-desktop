@@ -33,9 +33,9 @@ const severityOrder: Record<ScanSeverity, number> = {
 const codeExtensions = new Set(['.js', '.mjs', '.cjs', '.jsx', '.ts', '.mts', '.cts', '.tsx'])
 const maxReportFindings = 500
 const lifecycleNames = new Set(['preinstall', 'install', 'postinstall', 'prepare', 'prepack'])
-const exoticDependency = /^(?:file|link|workspace|git|git\+|https?):|^[^\s]+#[^\s]+$/i
-const dangerousScript = /(?:curl|wget|invoke-webrequest|powershell|pwsh)\b|\|\s*(?:sh|bash|cmd|powershell)\b|(?:^|[;&|])\s*(?:reg|schtasks)\b/i
+const dangerousScript = /(?:curl|wget|invoke-webrequest)\b[^\n]*\|\s*(?:sh|bash|cmd|powershell|pwsh)\b|(?:powershell|pwsh)\b[^\n]*(?:-enc(?:odedcommand)?\b|invoke-expression\b|downloadstring\b)|(?:^|[;&|])\s*(?:reg\s+add|schtasks\s+\/create)\b/i
 const exactVersion = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+const maliciousAstKinds = new Set(['obfuscated-code', 'data-exfiltration'])
 
 function redactEvidence(value: string | null | undefined): string | undefined {
   if (!value) return undefined
@@ -79,62 +79,28 @@ function scanManifest(
   addFinding: (value: ScanFinding) => void
 ): Record<string, unknown> | undefined {
   const entry = entries.find((candidate) => candidate.path === 'package.json')
-  if (!entry?.text) {
-    addFinding(finding(
-      'manifest.missing',
-      'high',
-      'manifest',
-      '制品缺少 package.json',
-      '无法确认入口文件、依赖和安装脚本。'
-    ))
-    return undefined
-  }
+  if (!entry?.text) return undefined
   let manifest: Record<string, unknown>
   try {
     const parsed = JSON.parse(entry.text) as unknown
     manifest = objectValue(parsed) ?? {}
   } catch {
-    addFinding(finding(
-      'manifest.invalid-json',
-      'high',
-      'manifest',
-      'package.json 无法解析',
-      '扫描器无法可靠分析安装脚本和依赖。',
-      entry.path
-    ))
     return undefined
   }
 
   const scripts = objectValue(manifest.scripts)
   for (const [name, value] of Object.entries(scripts ?? {})) {
     if (!lifecycleNames.has(name) || typeof value !== 'string') continue
+    if (!dangerousScript.test(value)) continue
     addFinding(finding(
       `manifest.lifecycle.${name}`,
-      dangerousScript.test(value) ? 'critical' : 'high',
+      'critical',
       'manifest',
-      `声明 ${name} 生命周期脚本`,
-      dangerousScript.test(value)
-        ? '安装脚本包含下载、Shell 管道或用户级系统修改命令。'
-        : '该脚本会在安装或构建阶段以当前用户权限运行。',
+      `${name} 安装脚本包含攻击链命令`,
+      '安装脚本组合了远程下载与命令执行，或尝试修改持久化系统配置。',
       entry.path,
       value
     ))
-  }
-
-  for (const section of ['dependencies', 'optionalDependencies']) {
-    const dependencies = objectValue(manifest[section])
-    for (const [name, value] of Object.entries(dependencies ?? {})) {
-      if (typeof value !== 'string' || !exoticDependency.test(value)) continue
-      addFinding(finding(
-        'manifest.exotic-dependency',
-        'high',
-        'manifest',
-        '依赖使用非 registry 来源',
-        `${name} 通过文件、Git 或任意 URL 获取，不能仅依赖 registry 完整性。`,
-        entry.path,
-        `${name}: ${value}`
-      ))
-    }
   }
   return manifest
 }
@@ -158,68 +124,43 @@ function manifestDependencies(manifest: Record<string, unknown> | undefined): Sc
   return [...dependencies.values()].sort((left, right) => left.name.localeCompare(right.name))
 }
 
-interface FileCapabilities {
-  sensitive: boolean
-  network: boolean
-  encoded: boolean
-  dynamic: boolean
-  download: boolean
-  shell: boolean
+const sensitiveExpression = String.raw`process\.env(?:\[['"][^'"]*(?:token|secret|password|credential|cookie|session|auth|key)[^'"]*['"]\]|\.[a-z0-9_]*(?:token|secret|password|credential|cookie|session|auth|key))|(?:readFileSync|readFile)\s*\([^)]*(?:\.ssh[\\/]|\.npmrc\b|credentials(?:\.json)?\b|session\.json\b)`
+const networkSink = String.raw`(?:fetch|axios\.(?:post|put|patch)|https?\.(?:request|get)|sendBeacon)\s*\(`
+const encodedPattern = /(?:Buffer\.from\s*\([^)]*["']base64["']|String\.fromCharCode|\\x[0-9a-f]{2}|\\u[0-9a-f]{4})/gi
+const dynamicPattern = /\b(?:eval|Function)\s*\(|\bvm\.(?:run|Script)/gi
+const downloadPattern = /\b(?:curl|wget|Invoke-WebRequest|downloadFile)\b|https?:\/\/[^\s"']+\.(?:exe|dll|ps1|bat|cmd|sh)\b/gi
+const shellPattern = /\bchild_process\b|\b(?:exec|execFile|spawn|fork)\s*\(|\b(?:powershell|pwsh|cmd\.exe|\/bin\/(?:sh|bash))\b/gi
+
+function hasSensitiveNetworkFlow(source: string): boolean {
+  if (new RegExp(`${networkSink}[\\s\\S]{0,600}(?:${sensitiveExpression})`, 'i').test(source)) {
+    return true
+  }
+  const assignment = new RegExp(
+    String.raw`(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:${sensitiveExpression})`,
+    'gi'
+  )
+  for (const match of source.matchAll(assignment)) {
+    const identifier = match[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    if (new RegExp(`${networkSink}[\\s\\S]{0,600}\\b${identifier}\\b`, 'i').test(source)) {
+      return true
+    }
+  }
+  return false
+}
+
+function hasNearbyMatches(source: string, left: RegExp, right: RegExp): boolean {
+  const leftIndexes = [...source.matchAll(new RegExp(left.source, left.flags))].map((match) => match.index)
+  const rightIndexes = [...source.matchAll(new RegExp(right.source, right.flags))].map((match) => match.index)
+  return leftIndexes.some((leftIndex) =>
+    rightIndexes.some((rightIndex) => Math.abs(leftIndex - rightIndex) <= 600)
+  )
 }
 
 function scanContent(entry: ArtifactEntry, addFinding: (value: ScanFinding) => void): void {
   if (!entry.text) return
   const source = entry.text
-  const capabilities: FileCapabilities = {
-    sensitive: /process\.env(?:\[['"]|\.)[a-z0-9_]*(?:token|secret|password|credential|cookie|session|auth|key)|\.ssh[\\/]|\.npmrc\b|credentials(?:\.json)?\b|session\.json\b|api[_-]?key|access[_-]?token/i.test(source),
-    network: /\b(?:fetch|WebSocket)\s*\(|\b(?:https?|net|dns)\s*\.|require\s*\(\s*["'](?:https?|net|dns)["']\s*\)/i.test(source),
-    encoded: /(?:Buffer\.from\s*\([^)]*["']base64["']|String\.fromCharCode|\\x[0-9a-f]{2}|\\u[0-9a-f]{4})/i.test(source),
-    dynamic: /\b(?:eval|Function)\s*\(|\bvm\.(?:run|Script)/i.test(source),
-    download: /\b(?:curl|wget|Invoke-WebRequest|downloadFile)\b|https?:\/\/[^\s"']+\.(?:exe|dll|ps1|bat|cmd|sh)\b/i.test(source),
-    shell: /\bchild_process\b|\b(?:exec|execFile|spawn|fork)\s*\(|\b(?:powershell|pwsh|cmd\.exe|\/bin\/(?:sh|bash))\b/i.test(source)
-  }
 
-  if (capabilities.dynamic) {
-    addFinding(finding(
-      'code.dynamic-execution',
-      'high',
-      'dynamic-execution',
-      '代码包含动态执行能力',
-      '检测到 eval、Function 或 Node.js vm 动态执行。',
-      entry.path
-    ))
-  }
-  if (capabilities.shell) {
-    addFinding(finding(
-      'code.shell-execution',
-      'high',
-      'shell',
-      '代码可以启动外部命令',
-      '检测到 child_process、Shell 或 PowerShell 调用。',
-      entry.path
-    ))
-  }
-  if (capabilities.sensitive) {
-    addFinding(finding(
-      'code.sensitive-access',
-      'medium',
-      'sensitive-data',
-      '代码可能读取敏感数据',
-      '检测到环境变量、凭据文件或会话数据访问。',
-      entry.path
-    ))
-  }
-  if (capabilities.network) {
-    addFinding(finding(
-      'code.network-access',
-      'medium',
-      'network',
-      '代码包含网络访问能力',
-      '检测到 HTTP、Socket、DNS 或 WebSocket 使用。',
-      entry.path
-    ))
-  }
-  if (capabilities.sensitive && capabilities.network) {
+  if (hasSensitiveNetworkFlow(source)) {
     addFinding(finding(
       'chain.sensitive-network',
       'critical',
@@ -229,7 +170,7 @@ function scanContent(entry: ArtifactEntry, addFinding: (value: ScanFinding) => v
       entry.path
     ))
   }
-  if (capabilities.encoded && capabilities.dynamic) {
+  if (hasNearbyMatches(source, encodedPattern, dynamicPattern)) {
     addFinding(finding(
       'chain.encoded-execution',
       'critical',
@@ -239,7 +180,7 @@ function scanContent(entry: ArtifactEntry, addFinding: (value: ScanFinding) => v
       entry.path
     ))
   }
-  if (capabilities.download && capabilities.shell) {
+  if (hasNearbyMatches(source, downloadPattern, shellPattern)) {
     addFinding(finding(
       'chain.download-execution',
       'critical',
@@ -262,13 +203,6 @@ function firstLocation(warning: Warning): ScanFinding['location'] {
     return undefined
   }
   return { line: start[0], column: start[1] }
-}
-
-function astSeverity(warning: Warning): ScanSeverity {
-  if (warning.kind === 'parsing-error') return 'medium'
-  if (warning.severity === 'Critical') return 'critical'
-  if (warning.severity === 'Warning') return 'medium'
-  return 'info'
 }
 
 function scanAst(
@@ -305,16 +239,19 @@ function scanAst(
     coverage.astFiles += 1
     for (const warning of report.warnings) {
       if (warning.kind === 'parsing-error') coverage.parseErrors += 1
+      if (!maliciousAstKinds.has(warning.kind)) continue
       const value = finding(
         `jsxray.${warning.kind}`,
-        astSeverity(warning),
+        'critical',
         warning.kind.includes('command') ? 'shell' :
           warning.kind.includes('exfiltration') || warning.kind.includes('environment') ? 'sensitive-data' :
             warning.kind.includes('obfuscat') || warning.kind.includes('encoded') ? 'obfuscation' :
               warning.kind.includes('unsafe-stmt') || warning.kind.includes('vm-context') ? 'dynamic-execution' :
                 'code-quality',
-        `JS-X-Ray：${warning.kind}`,
-        'AST 引擎检测到需要复核的代码模式。',
+        warning.kind === 'data-exfiltration' ? 'AST 检测到数据外传链路' : 'AST 检测到已知代码混淆器',
+        warning.kind === 'data-exfiltration'
+          ? '敏感数据被传入网络发送接口，符合明确的数据外传行为。'
+          : '代码使用已知混淆器隐藏实际执行逻辑。',
         entry.path,
         warning.value ?? undefined,
         '@nodesecure/js-x-ray'
@@ -325,23 +262,13 @@ function scanAst(
   } catch (error) {
     coverage.complete = false
     coverage.parseErrors += 1
-    addFinding(finding(
-      'jsxray.parsing-error',
-      'medium',
-      'code-quality',
-      'AST 解析失败',
-      error instanceof Error ? error.message : 'JS/TS 文件无法解析。',
-      entry.path,
-      undefined,
-      '@nodesecure/js-x-ray'
-    ))
+    coverage.notes.push(`${entry.path} AST 解析失败：${error instanceof Error ? error.message : '无法解析'}`)
   }
 }
 
 function recommendation(findings: ScanFinding[], complete: boolean): ScanReport['recommendation'] {
   if (findings.some((item) => item.severity === 'critical')) return 'block'
   if (!complete) return 'incomplete'
-  if (findings.some((item) => severityOrder[item.severity] >= severityOrder.medium)) return 'review'
   return 'pass'
 }
 
@@ -352,13 +279,15 @@ export async function scanArtifact(
   const startedAt = Date.now()
   const limits = { ...defaultScanLimits, ...options.limits }
   const artifact = await readArtifact(input, limits)
-  const findings = artifact.findings.slice(0, maxReportFindings)
-  if (artifact.findings.length > maxReportFindings) {
+  const criticalArtifactFindings = artifact.findings.filter((item) => item.severity === 'critical')
+  const findings = criticalArtifactFindings.slice(0, maxReportFindings)
+  if (criticalArtifactFindings.length > maxReportFindings) {
     artifact.coverage.complete = false
     artifact.coverage.notes.push(`扫描发现超过 ${maxReportFindings} 项，报告已截断`)
   }
   const findingKeys = new Set(findings.map((item) => `${item.ruleId}\0${item.file ?? ''}`))
   const addFinding = (value: ScanFinding): void => {
+    if (value.severity !== 'critical') return
     const key = `${value.ruleId}\0${value.file ?? ''}`
     if (findingKeys.has(key)) return
     if (findings.length >= maxReportFindings) {
@@ -404,7 +333,7 @@ export async function scanArtifact(
     schemaVersion: 1,
     engine: {
       id: '@dsh-desktop/security-scanner',
-      version: '0.3.0',
+      version: '0.4.0',
       rulePacks: (options.rulePacks ?? []).map(({ id, version }) => ({ id, version }))
     },
     artifact: input.identity ?? {},

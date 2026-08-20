@@ -103,7 +103,7 @@ describe('plugin update detection', () => {
   })
 
   it('tracks a scanned GitHub commit through its unpinned catalog source', async () => {
-    vi.mocked(fetch).mockResolvedValue(jsonResponse({
+    vi.mocked(fetch).mockImplementation(async () => jsonResponse({
       name: 'example-plugin',
       version: '1.3.0',
       dsh: { bundle: { patch: './cordis.patch.yml' } }

@@ -1508,64 +1508,6 @@ button {
   white-space: nowrap;
 }
 
-.security-supply-chain {
-  margin-top: 22px;
-}
-
-.security-signal-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.security-signal {
-  padding: 11px 12px;
-  border: 1px solid #263e5a;
-  border-radius: 8px;
-  background: #0b1c30;
-}
-
-.security-signal span,
-.security-signal strong {
-  display: block;
-}
-
-.security-signal span {
-  color: #6c829b;
-  font-size: 12px;
-}
-
-.security-signal strong {
-  margin-top: 6px;
-  color: #b8c7d9;
-  font-size: 12px;
-  font-weight: 620;
-}
-
-.security-signal--ok {
-  border-color: rgba(71, 185, 128, 0.32);
-}
-
-.security-signal--ok strong {
-  color: #79c9a4;
-}
-
-.security-signal--warn {
-  border-color: rgba(217, 172, 98, 0.35);
-}
-
-.security-signal--warn strong {
-  color: #d9b475;
-}
-
-.security-signal--danger {
-  border-color: rgba(218, 84, 92, 0.48);
-}
-
-.security-signal--danger strong {
-  color: #ed8e94;
-}
-
 .security-coverage-notes {
   display: flex;
   gap: 11px;
@@ -1980,10 +1922,6 @@ button {
 
   .security-summary-grid {
     grid-template-columns: repeat(2, 1fr);
-  }
-
-  .security-signal-grid {
-    grid-template-columns: 1fr;
   }
 
   .security-review-footer {

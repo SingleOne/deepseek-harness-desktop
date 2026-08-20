@@ -11,7 +11,7 @@ function report(): ScanReport {
     schemaVersion: 1,
     engine: {
       id: '@dsh-desktop/security-scanner',
-      version: '0.3.0',
+      version: '0.4.0',
       rulePacks: []
     },
     artifact: { source: 'npm', name: 'safe-plugin', version: '1.0.0' },
@@ -102,14 +102,31 @@ describe('plugin supply-chain advisory service', () => {
     expect(JSON.stringify(osvBody)).not.toContain('range-dependency')
   })
 
-  it('adds review findings for OSV matches, missing signatures and a fresh release', async () => {
+  it('blocks only high or critical OSV matches and keeps ordinary supply-chain signals silent', async () => {
     const fetchImpl = (async (input: string | URL | Request) => {
       const url = String(input)
       if (url.endsWith('/v1/querybatch')) {
-        return json({ results: [{ vulns: [{ id: 'GHSA-test-1234' }] }, {}] })
+        return json({ results: [{ vulns: [{ id: 'GHSA-test-1234' }, { id: 'GHSA-moderate-5678' }] }, {}] })
       }
       if (url.endsWith('/v1/vulns/GHSA-test-1234')) {
-        return json({ id: 'GHSA-test-1234', summary: '测试依赖漏洞' })
+        return json({
+          id: 'GHSA-test-1234',
+          summary: '测试重大依赖漏洞',
+          severity: [{
+            type: 'CVSS_V3',
+            score: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H'
+          }]
+        })
+      }
+      if (url.endsWith('/v1/vulns/GHSA-moderate-5678')) {
+        return json({
+          id: 'GHSA-moderate-5678',
+          summary: '测试普通依赖漏洞',
+          severity: [{
+            type: 'CVSS_V3',
+            score: 'CVSS:3.1/AV:L/AC:H/PR:H/UI:R/S:U/C:L/I:L/A:N'
+          }]
+        })
       }
       throw new Error(`unexpected URL ${url}`)
     }) as typeof fetch
@@ -123,13 +140,12 @@ describe('plugin supply-chain advisory service', () => {
       () => Date.parse('2026-08-19T00:00:00.000Z')
     ).enrich({ report: report(), source: 'npm', npm: packageMetadata })
 
-    expect(result.recommendation).toBe('review')
+    expect(result.recommendation).toBe('block')
     expect(result.supplyChain.releaseAge.status).toBe('too-new')
-    expect(result.findings).toEqual(expect.arrayContaining([
-      expect.objectContaining({ ruleId: 'osv.GHSA-test-1234', severity: 'high' }),
-      expect.objectContaining({ ruleId: 'supply-chain.registry-signature-missing' }),
-      expect.objectContaining({ ruleId: 'supply-chain.release-too-new' })
-    ]))
+    expect(result.supplyChain.osv.vulnerabilityCount).toBe(1)
+    expect(result.findings).toEqual([
+      expect.objectContaining({ ruleId: 'osv.GHSA-test-1234', severity: 'critical' })
+    ])
   })
 
   it('blocks an npm artifact whose registry signature is invalid', async () => {
@@ -158,7 +174,7 @@ describe('plugin supply-chain advisory service', () => {
     }))
   })
 
-  it('requires review instead of blocking when a historical signing key is unavailable', async () => {
+  it('does not create a risk finding when a historical signing key is unavailable', async () => {
     const fetchImpl = (async (input: string | URL | Request) => {
       const url = String(input)
       if (url.endsWith('/-/npm/v1/keys')) return json({ keys: [] })
@@ -172,11 +188,8 @@ describe('plugin supply-chain advisory service', () => {
       npm: metadata([{ keyId: 'SHA256:retired-key', signature: 'dGVzdA==' }])
     })
 
-    expect(result.recommendation).toBe('review')
+    expect(result.recommendation).toBe('pass')
     expect(result.supplyChain.registrySignature.status).toBe('unavailable')
-    expect(result.findings).toContainEqual(expect.objectContaining({
-      ruleId: 'supply-chain.registry-signature-key-unavailable',
-      severity: 'medium'
-    }))
+    expect(result.findings).toEqual([])
   })
 })

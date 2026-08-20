@@ -12,8 +12,8 @@ import {
   type NpmSupplyChainMetadata
 } from './plugin-security-advisory-service'
 
-const scannerVersion = '0.3.0'
-const dshRulePackVersion = '0.1.0'
+const scannerVersion = '0.4.0'
+const dshRulePackVersion = '0.2.0'
 const maxDownloadBytes = 32 * 1024 * 1024
 
 export interface PreparedSecurityArtifact {
@@ -261,17 +261,9 @@ export class PluginSecurityService {
           report.coverage.dependencyCoverage = 'locked-tree'
         } catch {
           report.coverage.notes.push('pnpm 锁定依赖树解析失败，OSV 仅覆盖制品清单中的精确版本')
-          report.findings.push({
-            ruleId: 'supply-chain.lock-resolution-unavailable',
-            severity: 'medium',
-            category: 'dependency',
-            title: '完整依赖树未能锁定',
-            description: '传递依赖未纳入本次 OSV 查询，需要人工确认。',
-            engine: 'desktop-supply-chain'
-          })
         }
       }
-      onPhase('scanning-artifact', `正在核验 ${plugin.name} 的供应链信号`)
+      onPhase('scanning-artifact', `正在查询 ${plugin.name} 的重大漏洞并核验制品完整性`)
       report = await this.advisoryService.enrich({
         report,
         source: plugin.source,
