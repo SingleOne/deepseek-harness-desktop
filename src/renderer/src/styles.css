@@ -614,6 +614,58 @@ button {
     #07111f;
 }
 
+.loading-border {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.loading-border-svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+
+.loading-border-svg > rect {
+  x: 1px;
+  y: 1px;
+  width: calc(100% - 2px);
+  height: calc(100% - 2px);
+  fill: none;
+}
+
+.loading-border-track {
+  stroke: rgba(97, 138, 255, 0.16);
+  stroke-width: 1px;
+}
+
+.loading-border-segment {
+  stroke: var(--loading-border-color);
+  stroke-width: 2px;
+  stroke-linecap: round;
+  stroke-dasharray: 14 86;
+  animation: loading-border-orbit var(--loading-border-duration) linear infinite;
+}
+
+.loading-border-glow {
+  stroke-width: 5px;
+  opacity: 0.8;
+  filter: blur(7px);
+}
+
+.loading-border-head {
+  stroke: #edf6ff;
+  stroke-dasharray: 2 98;
+}
+
+.main-workspace > .loading-border {
+  position: fixed;
+  z-index: 10;
+  inset: 88px 0 0;
+}
+
 .runtime-placeholder {
   display: flex;
   height: 100%;
@@ -656,6 +708,25 @@ button {
   color: #8497af;
   font-size: 13px;
   line-height: 1.65;
+}
+
+.runtime-update-progress {
+  position: relative;
+  width: min(320px, 100%);
+  height: 4px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #1a2e49;
+}
+
+.runtime-update-progress::after {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 32%;
+  border-radius: inherit;
+  content: "";
+  background: linear-gradient(90deg, #527cff, #a2d5ff, #527cff);
+  animation: runtime-update-sweep 1.4s ease-in-out infinite;
 }
 
 .runtime-actions {
@@ -1275,6 +1346,7 @@ button {
 }
 
 .security-review {
+  position: relative;
   display: flex;
   width: min(920px, 100%);
   max-height: min(820px, calc(100vh - 56px));
@@ -1891,6 +1963,24 @@ button {
   }
 }
 
+@keyframes loading-border-orbit {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 100;
+  }
+}
+
+@keyframes runtime-update-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(313%);
+  }
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -1957,6 +2047,16 @@ button {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .loading-border-segment,
+  .runtime-update-progress::after {
+    animation: none !important;
+  }
+
+  .runtime-update-progress::after {
+    width: 100%;
+    opacity: 0.65;
+  }
+
   *,
   *::before,
   *::after {

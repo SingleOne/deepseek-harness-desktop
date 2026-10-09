@@ -18,20 +18,6 @@ export interface DshCommandOptions {
   prependPath?: readonly string[]
 }
 
-const runnerSource = String.raw`
-import { pathToFileURL } from 'node:url';
-const entryPath = process.env.DEEPSEEK_HARNESS_DESKTOP_DSH_ENTRY;
-if (!entryPath) throw new Error('Missing DSH entry path');
-const appArgs = process.argv.slice(1);
-process.argv = [process.execPath, entryPath, ...appArgs];
-process.on('message', (message) => {
-  if (message && message.type === 'deepseek-harness-desktop:shutdown') {
-    process.emit('SIGTERM', 'SIGTERM');
-  }
-});
-await import(pathToFileURL(entryPath).href);
-`
-
 function displayArgument(argument: string): string {
   return /^[a-zA-Z0-9@._+/:=#-]+$/.test(argument) ? argument : JSON.stringify(argument)
 }
@@ -63,9 +49,10 @@ export function spawnDshCommand(
 ): ChildProcess {
   onLine?.(`$ dsh ${args.map(displayArgument).join(' ')}`)
   const environment = buildDshCommandEnvironment(installation, options, commandEnvironment())
+  // Execute the CLI as the main module so import.meta.main is true.
   const child = spawn(
     installation.nodePath ?? 'node',
-    ['--input-type=module', '--eval', runnerSource, '--', ...args],
+    [installation.entryPath, ...args],
     {
       cwd: workingDirectory,
       env: environment,

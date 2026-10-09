@@ -27,6 +27,7 @@ import type {
   PluginUpdateInfo
 } from '../../shared/plugin-market'
 import { CatalogSelect, type CatalogSelectOption } from './CatalogSelect'
+import { LoadingBorder } from './LoadingBorder'
 
 const catalogPageSize = 24
 const sortOptions: CatalogSelectOption[] = [
@@ -265,6 +266,7 @@ function SecurityScanProgressDialog({
             </button>
           </div>
         </footer>
+        <LoadingBorder active={!failed} radius={12} />
       </section>
     </div>
   )
@@ -461,6 +463,7 @@ function SecurityReviewDialog({
             </button>
           </div>
         </footer>
+        <LoadingBorder active={submitting} radius={12} />
       </section>
     </div>
   )
@@ -500,6 +503,7 @@ export function MainApp() {
   const [installedLoading, setInstalledLoading] = useState(false)
   const [catalogError, setCatalogError] = useState<string>()
   const [actionError, setActionError] = useState<string>()
+  const [dshUpdating, setDshUpdating] = useState(false)
   const [updates, setUpdates] = useState<PluginUpdateInfo[] | null>(null)
   const [updatesLoading, setUpdatesLoading] = useState(false)
   const [updatesError, setUpdatesError] = useState<string>()
@@ -762,12 +766,16 @@ export function MainApp() {
   }
 
   const updateDsh = async (): Promise<void> => {
-    if (!api) return
+    if (!api || dshUpdating) return
+    setDshUpdating(true)
     setActionError(undefined)
+    navigate('dsh')
     try {
       await api.updateDsh()
     } catch (error) {
       setActionError(messageOf(error))
+    } finally {
+      setDshUpdating(false)
     }
   }
 
@@ -781,19 +789,38 @@ export function MainApp() {
     }
   }
 
+  const workspaceLoading =
+    dshUpdating ||
+    (section === 'dsh'
+      ? runtime.phase === 'starting'
+      : section === 'market'
+        ? catalogLoading
+        : installedLoading || updatesLoading)
+
   return (
     <main className="main-shell">
       <header className="main-titlebar">
         <span className="product-name">dsh-desktop</span>
-        {runtime.availableDshUpdateVersion ? (
+        {runtime.availableDshUpdateVersion || dshUpdating ? (
           <button
             className="titlebar-update-button titlebar-update-button--dsh"
-            title={`DSH ${runtime.version ?? ''} → ${runtime.availableDshUpdateVersion}`}
-            disabled={runtime.phase !== 'ready'}
+            title={
+              dshUpdating
+                ? '正在安装并重新启动 DSH'
+                : `DSH ${runtime.version ?? ''} → ${runtime.availableDshUpdateVersion}`
+            }
+            disabled={dshUpdating || runtime.phase !== 'ready'}
+            aria-busy={dshUpdating}
             onClick={() => void updateDsh()}
           >
-            <RefreshCw aria-hidden="true" />
-            DSH 有更新，重启更新
+            {dshUpdating ? (
+              <span className="launcher-spinner" aria-hidden="true">
+                <LoaderCircle />
+              </span>
+            ) : (
+              <RefreshCw aria-hidden="true" />
+            )}
+            {dshUpdating ? '正在更新 DSH…' : 'DSH 有更新，重启更新'}
           </button>
         ) : null}
         {runtime.availableDesktopUpdateVersion ? (
@@ -867,22 +894,37 @@ export function MainApp() {
 
       <section className="main-workspace">
         {section === 'dsh' && (
-          <div className={`runtime-placeholder runtime-placeholder--${runtime.phase}`}>
+          <div
+            className={`runtime-placeholder runtime-placeholder--${dshUpdating ? 'updating' : runtime.phase}`}
+          >
             <div className="runtime-title-row">
-              {runtime.phase === 'starting' && <LoaderCircle className="spin" aria-hidden="true" />}
-              {runtime.phase === 'error' && <ShieldAlert aria-hidden="true" />}
+              {(dshUpdating || runtime.phase === 'starting') && (
+                <LoaderCircle className="spin" aria-hidden="true" />
+              )}
+              {!dshUpdating && runtime.phase === 'error' && <ShieldAlert aria-hidden="true" />}
               <h1>
-                {runtime.phase === 'starting'
-                  ? `正在启动 DSH${runtime.version ? ` ${runtime.version}` : ''}`
-                  : runtime.phase === 'error'
-                    ? 'DSH 启动失败'
-                    : runtime.phase === 'ready'
-                      ? '正在载入 DSH'
-                      : 'DSH 已停止'}
+                {dshUpdating
+                  ? '正在更新 DSH'
+                  : runtime.phase === 'starting'
+                    ? `正在启动 DSH${runtime.version ? ` ${runtime.version}` : ''}`
+                    : runtime.phase === 'error'
+                      ? 'DSH 启动失败'
+                      : runtime.phase === 'ready'
+                        ? '正在载入 DSH'
+                        : 'DSH 已停止'}
               </h1>
             </div>
-            {runtime.phase !== 'starting' && <p>{runtime.detail}</p>}
-            {runtime.phase === 'error' && (
+            {dshUpdating ? (
+              <>
+                <p>
+                  {runtime.phase === 'starting'
+                    ? runtime.detail
+                    : '正在安装新版本，完成后将自动重新启动。'}
+                </p>
+                <div className="runtime-update-progress" role="progressbar" aria-label="正在更新 DSH" />
+              </>
+            ) : runtime.phase !== 'starting' ? <p>{runtime.detail}</p> : null}
+            {!dshUpdating && runtime.phase === 'error' && (
               <div className="runtime-actions">
                 <button className="market-button market-button--primary" onClick={() => void restartDsh()}>
                   <RefreshCw aria-hidden="true" />
@@ -1151,6 +1193,7 @@ export function MainApp() {
             )}
           </div>
         )}
+        <LoadingBorder active={workspaceLoading} />
       </section>
 
       {(busy || operation.phase === 'failed' || operation.phase === 'succeeded' || actionError) && (
@@ -1169,6 +1212,7 @@ export function MainApp() {
               <pre>{operation.logs.join('\n')}</pre>
             </details>
           )}
+          <LoadingBorder active={busy} radius={10} />
         </aside>
       )}
 

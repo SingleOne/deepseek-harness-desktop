@@ -9,14 +9,16 @@ export interface CommandResult {
 
 export interface NpmCommandOptions {
   timeoutMs?: number
+  prefix?: string
 }
 
 const safeNpmArgument = /^[a-zA-Z0-9@._+/:=-]+$/
 
-function createNpmProcess(args: string[]) {
+function createNpmProcess(args: string[], options: NpmCommandOptions) {
   const environment = commandEnvironment()
   if (process.platform !== 'win32') {
     return spawn('npm', args, {
+      cwd: options.prefix,
       env: environment,
       windowsHide: true
     })
@@ -25,9 +27,9 @@ function createNpmProcess(args: string[]) {
   if (args.some((arg) => !safeNpmArgument.test(arg))) {
     throw new Error('npm 命令包含不支持的参数')
   }
-
   const command = ['npm', ...args].join(' ')
   return spawn(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', command], {
+    cwd: options.prefix,
     env: environment,
     windowsHide: true
   })
@@ -39,10 +41,13 @@ export function runNpm(
   options: NpmCommandOptions = {}
 ): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    const command = ['npm', ...args].join(' ')
+    // Pass the absolute prefix as cwd, avoiding quoted paths in Windows npm shims.
+    const commandArgs = options.prefix ? [...args, '--prefix=.'] : args
+    const command = ['npm', ...commandArgs].join(' ')
+    if (options.prefix) onLine?.(`[环境] npm 工作目录：${options.prefix}`)
     onLine?.(`$ ${command}`)
 
-    const child = createNpmProcess(args)
+    const child = createNpmProcess(commandArgs, options)
     const timeoutMs = options.timeoutMs ?? 20_000
     let stdout = ''
     let stderr = ''

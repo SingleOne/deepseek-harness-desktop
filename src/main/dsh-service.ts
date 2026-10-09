@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { bindDshOutput, spawnDshCommand } from './dsh-command'
 import {
@@ -11,6 +11,8 @@ import {
 import { runNpmChecked } from './npm-command'
 
 const DSH_PACKAGE = '@deepseek-ai/dsh'
+// Keep discovery and installation on the same npm prefix for this Desktop run.
+let npmGlobalPrefix: string | undefined
 
 interface DshPackageManifest {
   version?: string
@@ -25,6 +27,7 @@ export interface DshInstallation {
 
 export interface DshRuntimeOptions {
   readonly notificationBridgeEnvironment?: NotificationBridgeEnvironment
+  readonly onReadyUrl?: (url: string) => void
 }
 
 type OutputLine = (line: string) => void
@@ -34,8 +37,22 @@ function resolveBinPath(manifest: DshPackageManifest): string | undefined {
   return manifest.bin?.dsh ?? Object.values(manifest.bin ?? {})[0]
 }
 
+async function getNpmGlobalPrefix(onLine?: OutputLine): Promise<string> {
+  if (npmGlobalPrefix) return npmGlobalPrefix
+  const result = await runNpmChecked(['prefix', '--global'], onLine)
+  npmGlobalPrefix = result.stdout.trim()
+  onLine?.(`[步骤] 本次运行使用 npm 全局前缀：${npmGlobalPrefix}`)
+  return npmGlobalPrefix
+}
+
 export async function getInstalledDsh(onLine?: OutputLine): Promise<DshInstallation | null> {
-  const npmRootResult = await runNpmChecked(['root', '--global'], onLine)
+  const prefix = await getNpmGlobalPrefix(onLine)
+  if (!existsSync(prefix)) {
+    onLine?.('[结果] npm 全局安装目录尚未创建，未找到 DSH')
+    return null
+  }
+
+  const npmRootResult = await runNpmChecked(['root', '--global'], onLine, { prefix })
   const npmRoot = npmRootResult.stdout.trim()
   onLine?.(`[步骤] npm 全局安装目录：${npmRoot}`)
   const packageDirectory = path.join(npmRoot, '@deepseek-ai', 'dsh')
@@ -92,10 +109,12 @@ export async function installDshVersion(
   version: string,
   onLine: (line: string) => void
 ): Promise<void> {
+  const prefix = await getNpmGlobalPrefix(onLine)
+  await mkdir(prefix, { recursive: true })
   await runNpmChecked(
     ['install', '--global', `${DSH_PACKAGE}@${version}`, '--no-audit', '--no-fund'],
     onLine,
-    { timeoutMs: 5 * 60_000 }
+    { timeoutMs: 5 * 60_000, prefix }
   )
 }
 
@@ -114,7 +133,7 @@ export function startDsh(
   onLine(`[环境] 桌面通知桥接=${options.notificationBridgeEnvironment ? '已启用' : '未启用'}`)
   const child = spawnDshCommand(
     installation,
-    ['web', '--host', '127.0.0.1', '--port', String(port)],
+    ['web', '--host', '127.0.0.1', '--port', String(port), '--no-open'],
     workingDirectory,
     onLine,
     {
@@ -122,7 +141,15 @@ export function startDsh(
       removeEnvironment: [DSH_NOTIFY_BRIDGE_URL_ENV, DSH_NOTIFY_BRIDGE_TOKEN_ENV]
     }
   )
-  bindDshOutput(child, onLine)
+  bindDshOutput(child, (line) => {
+    const readyUrl = line.match(/^\[stdout\] dsh web: (http:\/\/127\.0\.0\.1:\d+\/\S*)/)?.[1]
+    if (readyUrl?.startsWith(`http://127.0.0.1:${port}/`)) {
+      options.onReadyUrl?.(readyUrl)
+      onLine(`[stdout] dsh web: http://127.0.0.1:${port}/（鉴权信息已省略）`)
+      return
+    }
+    onLine(line)
+  })
   return child
 }
 
@@ -130,8 +157,9 @@ export async function waitForDsh(
   url: string,
   child: ChildProcess,
   timeoutMs = 60_000,
-  onLine?: OutputLine
-): Promise<void> {
+  onLine?: OutputLine,
+  getReadyUrl?: () => string | undefined
+): Promise<string> {
   const deadline = Date.now() + timeoutMs
   let lastRetryLogAt = 0
   onLine?.(`[HTTP] GET ${url}`)
@@ -143,10 +171,14 @@ export async function waitForDsh(
     }
 
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(1_500) })
-      if (response.status < 500) {
+      const pageUrl = getReadyUrl?.() ?? url
+      const response = await fetch(pageUrl, {
+        redirect: 'manual',
+        signal: AbortSignal.timeout(1_500)
+      })
+      if (response.ok || (response.status === 303 && pageUrl !== url)) {
         onLine?.(`[HTTP] ${response.status}，DSH Web UI 已就绪`)
-        return
+        return pageUrl
       }
       if (Date.now() - lastRetryLogAt > 2_000) {
         lastRetryLogAt = Date.now()

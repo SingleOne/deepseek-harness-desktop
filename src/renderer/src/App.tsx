@@ -1,6 +1,7 @@
 import { Activity, ArrowRight, CircleAlert, LoaderCircle, Power, RefreshCw, Terminal } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { LauncherState } from '../../shared/launcher'
+import { LoadingBorder } from './LoadingBorder'
 
 const initialState: LauncherState = {
   phase: 'idle',
@@ -214,6 +215,7 @@ export function LauncherApp() {
             <span>{isReady ? 'DSH 已就绪，右侧保留本次启动的完整输出' : '服务就绪后将进入官方 DSH Web UI'}</span>
           </div>
         </aside>
+        <LoadingBorder active={isLoading} />
       </section>
 
       <footer className="footer-note">

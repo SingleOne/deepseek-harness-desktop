@@ -308,6 +308,9 @@ export class LauncherController {
     await installDshVersion(version, (line) => this.appendDetailedLog(line))
     const installation = await getInstalledDsh((line) => this.appendDetailedLog(line))
     if (!installation) throw new Error('npm 已完成，但没有找到 DSH 安装')
+    if (installation.version !== version) {
+      throw new Error(`npm 已完成，但实际安装的 DSH 版本为 ${installation.version}，预期为 ${version}`)
+    }
     this.setState({ installedDshVersion: installation.version })
     return installation
   }
@@ -330,12 +333,18 @@ export class LauncherController {
       version: installation.version
     })
 
+    let readyUrl: string | undefined
     this.dshProcess = startDsh(
       installation,
       port,
       app.getPath('home'),
       (line) => this.appendDetailedLog(line),
-      { notificationBridgeEnvironment: this.notificationBridgeEnvironment }
+      {
+        notificationBridgeEnvironment: this.notificationBridgeEnvironment,
+        onReadyUrl: (url) => {
+          readyUrl = url
+        }
+      }
     )
 
     this.dshProcess.once('error', (error) => this.appendLog(`[error] ${error.message}`, 'error'))
@@ -345,9 +354,15 @@ export class LauncherController {
       detail: url
     })
 
-    await waitForDsh(url, this.dshProcess, 60_000, (line) => this.appendDetailedLog(line))
+    const pageUrl = await waitForDsh(
+      url,
+      this.dshProcess,
+      60_000,
+      (line) => this.appendDetailedLog(line),
+      () => readyUrl
+    )
     const mainWindow = this.ensureMainWindow()
-    await mainWindow.loadDsh(url)
+    await mainWindow.loadDsh(pageUrl)
 
     const processAtLaunch = this.dshProcess
     processAtLaunch.once('exit', (exitCode) => {
